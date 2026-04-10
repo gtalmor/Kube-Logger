@@ -62,11 +62,48 @@
   .ftl-label { font-size:10px; color:var(--muted); margin-bottom:4px; }
   .fnodes { display:flex; align-items:center; font-size:11px; }
   .fnode { padding:3px 8px; border-radius:4px; cursor:pointer; white-space:nowrap; border:1px solid var(--border); background:var(--bg); margin:0 1px; }
-  .fnode:hover { border-color:var(--accent); }
+  .fnode:hover { border-color:var(--accent); background:var(--bg3); }
   .fnode.done { border-color:var(--success); color:var(--success); }
+  .fnode.post { border-color:var(--success); color:var(--success); }
   .fnode.process { border-color:var(--accent); color:var(--accent); }
+  .fnode.pre { border-color:var(--warn); color:var(--warn); }
   .fnode.failed { border-color:var(--error); color:var(--error); background:rgba(248,81,73,.08); }
   .farrow { color:var(--muted); padding:0 2px; font-size:12px; }
+  .farrow.fsep { color:var(--border); font-weight:700; padding:0 6px; }
+  .fflow-label { font-size:10px; color:var(--accent); background:rgba(88,166,255,.1); padding:2px 6px; border-radius:3px; margin-right:4px; white-space:nowrap; cursor:pointer; display:inline-flex; align-items:center; gap:4px; }
+  .fflow-label:hover { background:rgba(88,166,255,.2); }
+  .fflow-hide { opacity:0; font-size:13px; color:var(--muted); cursor:pointer; transition:opacity .15s; } .fflow-label:hover .fflow-hide { opacity:.6; } .fflow-hide:hover { opacity:1!important; color:var(--error); }
+  .fhidden-badge { font-size:10px; color:var(--muted); background:var(--bg3); padding:2px 8px; border-radius:3px; cursor:pointer; border:1px solid var(--border); } .fhidden-badge:hover { border-color:var(--accent); color:var(--accent); }
+  .hp-section-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; padding:8px 14px 4px; }
+  .hp-flow-icon { color:var(--accent); flex-shrink:0; font-size:8px; }
+  .hp-exec-id { font-size:10px; color:var(--muted); }
+
+  /* Node popover */
+  .node-pop { position:fixed; z-index:200; background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:10px 14px; min-width:240px; max-width:380px; box-shadow:0 4px 16px rgba(0,0,0,.5); font-size:12px; }
+  .np-row { display:flex; justify-content:space-between; padding:3px 0; gap:12px; }
+  .np-label { color:var(--muted); flex-shrink:0; }
+  .np-val { color:var(--text); text-align:right; word-break:break-all; }
+  .np-val em { color:var(--accent); font-style:normal; }
+  .np-state-done { color:var(--success); } .np-state-process { color:var(--accent); } .np-state-pre { color:var(--warn); } .np-state-failed { color:var(--error); }
+  .np-fail { color:var(--error); font-weight:600; }
+  .np-link { color:var(--accent); cursor:pointer; } .np-link:hover { text-decoration:underline; }
+  .np-actions { display:flex; gap:6px; margin-top:8px; padding-top:8px; border-top:1px solid var(--border); }
+  .np-btn { padding:4px 10px; background:var(--bg3); border:1px solid var(--border); border-radius:4px; cursor:pointer; color:var(--text); font-size:11px; }
+  .np-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .np-divider { border-top:1px solid var(--border); margin:8px 0; }
+  .np-section-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; }
+  .np-path { display:flex; flex-wrap:wrap; align-items:center; gap:1px; margin-bottom:4px; }
+  .np-path-node { padding:2px 6px; border-radius:3px; font-size:10px; background:var(--bg); border:1px solid var(--border); color:var(--text); white-space:nowrap; }
+  .np-path-node.np-done { border-color:var(--success); color:var(--success); }
+  .np-path-node.np-nested { border-color:var(--accent); color:var(--accent); }
+  .np-path-node.np-path-fail { border-color:var(--error); color:var(--error); background:rgba(248,81,73,.1); font-weight:600; }
+  .np-path-arrow { color:var(--muted); font-size:10px; padding:0 1px; }
+
+  /* Failure tag in log lines */
+  .lfail { cursor:pointer; display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; border:1px solid var(--error); background:rgba(248,81,73,.1); color:var(--error); }
+  .lfail:hover { background:rgba(248,81,73,.2); }
+  .lfail-id { font-size:10px; opacity:.6; }
+  .lfail-hint { font-size:9px; opacity:.4; font-weight:400; }
 
   /* ── Welcome ── */
   .welcome { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:40px; }
@@ -88,7 +125,25 @@
   .ll.h5 { background:rgba(248,81,73,.1); border-bottom-color:rgba(248,81,73,.2); }
   .ll.h4 { background:rgba(210,153,34,.06); }
   .ll.fl { background:rgba(248,81,73,.08); border-left:3px solid var(--error); }
+  .ll.lplain { border-left:3px solid var(--warn); background:rgba(210,153,34,.04); }
+  .ll.lmulti { border-top:none; border-left-color:var(--border); background:rgba(210,153,34,.02); }
+  .ll.lmulti .lp { color:var(--border); font-size:14px; }
+  .ll.lscript-err { border-left:3px solid var(--error); background:rgba(248,81,73,.08); }
+  .ll.lerror-detail { border-left:3px solid var(--error); background:rgba(248,81,73,.12); font-weight:600; }
   .ll.hl { background:rgba(88,166,255,.15); border-left:3px solid var(--accent); }
+  .lh { opacity:0; color:var(--muted); cursor:pointer; padding:0 6px; flex-shrink:0; font-size:14px; transition:opacity .15s; }
+  .ll:hover .lh { opacity:.4; } .lh:hover { opacity:1!important; color:var(--error); }
+
+  /* Hidden patterns panel */
+  .hidden-panel { position:fixed; z-index:200; background:var(--bg2); border:1px solid var(--border); border-radius:8px; min-width:300px; max-width:500px; max-height:400px; box-shadow:0 4px 16px rgba(0,0,0,.5); font-size:12px; display:flex; flex-direction:column; }
+  .hp-header { padding:10px 14px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; font-weight:600; color:var(--bright); }
+  .hp-clear { font-weight:400; color:var(--error); cursor:pointer; font-size:11px; } .hp-clear:hover { text-decoration:underline; }
+  .hp-list { overflow-y:auto; max-height:320px; }
+  .hp-item { display:flex; align-items:center; padding:6px 14px; border-bottom:1px solid var(--border); gap:8px; }
+  .hp-item:hover { background:rgba(255,255,255,.03); }
+  .hp-pattern { flex:1; color:var(--text); word-break:break-all; min-width:0; }
+  .hp-remove { color:var(--muted); cursor:pointer; font-size:16px; padding:0 4px; flex-shrink:0; } .hp-remove:hover { color:var(--error); }
+  .hp-empty { padding:16px; color:var(--muted); text-align:center; }
 
   .ln { color:var(--trace); min-width:48px; text-align:right; padding-right:10px; user-select:none; flex-shrink:0; }
   .lt { color:var(--muted); min-width:95px; flex-shrink:0; padding-right:6px; }
@@ -114,6 +169,59 @@
   .toast { position:fixed; bottom:16px; right:16px; background:var(--bg3); border:1px solid var(--border); padding:8px 14px; border-radius:6px; font-size:12px; z-index:999; opacity:0; transform:translateY(8px); transition:all .25s; pointer-events:none; }
   .toast.v { opacity:1; transform:translateY(0); }
 
+  /* ── Trace panel ── */
+  .trace-panel { position:fixed; right:0; top:0; width:480px; height:100vh; background:var(--bg2); border-left:2px solid var(--accent); z-index:100; display:none; flex-direction:column; box-shadow:-4px 0 20px rgba(0,0,0,.5); }
+  .trace-panel.v { display:flex; }
+  .tp-header { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+  .tp-title { font-size:13px; font-weight:600; color:var(--bright); }
+  .tp-body { flex:1; overflow-y:auto; padding:12px 0; }
+
+  .tp-section { padding:0 16px 12px; border-bottom:1px solid var(--border); margin-bottom:10px; }
+  .tp-section-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; }
+
+  .tp-flow-name { font-size:14px; font-weight:700; color:var(--bright); margin-bottom:8px; }
+  .tp-flow-name .tp-exec-id { font-size:10px; font-weight:400; color:var(--muted); margin-left:6px; }
+
+  .tp-path { display:flex; flex-wrap:wrap; align-items:center; gap:2px; margin-bottom:4px; }
+  .tp-node { padding:3px 8px; border-radius:4px; font-size:11px; border:1px solid var(--border); background:var(--bg); cursor:pointer; white-space:nowrap; }
+  .tp-node:hover { border-color:var(--accent); }
+  .tp-node.done,.tp-node.post { border-color:var(--success); color:var(--success); }
+  .tp-node.process { border-color:var(--accent); color:var(--accent); }
+  .tp-node.pre { border-color:var(--warn); color:var(--warn); }
+  .tp-node.failed { border-color:var(--error); color:var(--error); background:rgba(248,81,73,.1); }
+  .tp-node.active { background:rgba(88,166,255,.15); }
+  .tp-arrow { color:var(--muted); font-size:11px; }
+
+  .tp-http { padding:6px 10px; border-radius:4px; font-size:11px; margin-top:6px; border:1px solid var(--border); background:var(--bg); }
+  .tp-http.err { border-color:var(--error); background:rgba(248,81,73,.08); }
+  .tp-http .tp-method { font-weight:600; }
+  .tp-http .tp-status { font-weight:700; padding:0 4px; border-radius:3px; }
+  .tp-http .tp-status.s5 { color:var(--error); }
+  .tp-http .tp-status.s4 { color:var(--warn); }
+  .tp-http .tp-status.s2 { color:var(--success); }
+
+  .tp-line { padding:3px 16px; font-size:11px; line-height:1.5; cursor:pointer; display:flex; gap:6px; }
+  .tp-line:hover { background:rgba(255,255,255,.03); }
+  .tp-line.err { background:rgba(248,81,73,.06); }
+  .tp-line .tp-ts { color:var(--muted); min-width:85px; flex-shrink:0; }
+  .tp-line .tp-lv { min-width:42px; flex-shrink:0; font-weight:600; }
+  .tp-line .tp-lv.ERROR { color:var(--error); } .tp-line .tp-lv.WARN { color:var(--warn); } .tp-line .tp-lv.DEBUG { color:var(--debug); } .tp-line .tp-lv.INFO { color:var(--info); } .tp-line .tp-lv.TRACE { color:var(--trace); }
+  .tp-line .tp-msg { flex:1; min-width:0; word-break:break-all; }
+  .tp-line .tp-flow-tag { font-size:9px; color:var(--accent); background:rgba(88,166,255,.1); padding:1px 5px; border-radius:3px; flex-shrink:0; }
+
+  .tp-errors { background:rgba(248,81,73,.06); }
+  .tp-failure { padding:6px 0; font-size:12px; color:var(--error); cursor:pointer; display:flex; align-items:baseline; gap:6px; }
+  .tp-failure:hover { text-decoration:underline; }
+  .tp-fail-icon { flex-shrink:0; }
+  .tp-fail-id { color:var(--muted); font-size:10px; }
+  .tp-error-detail { padding:4px 0; font-size:11px; color:var(--error); opacity:.85; cursor:pointer; }
+  .tp-error-detail:hover { opacity:1; }
+  .tp-inline-fail { padding:4px 0 4px 12px; font-size:11px; color:var(--error); border-left:2px solid var(--error); margin:4px 0; cursor:pointer; }
+  .tp-inline-fail:hover { background:rgba(248,81,73,.08); }
+  .tp-next-id { font-size:9px; color:var(--muted); opacity:.6; }
+  .tp-flow-tag.fail { background:rgba(248,81,73,.15); color:var(--error); }
+  .tp-empty { color:var(--muted); font-size:12px; text-align:center; padding:20px; }
+
   ::-webkit-scrollbar { width:7px; } ::-webkit-scrollbar-track { background:var(--bg); } ::-webkit-scrollbar-thumb { background:var(--bg3); border-radius:4px; } ::-webkit-scrollbar-thumb:hover { background:var(--border); }
   @media(max-width:800px) { .lp,.lr { display:none; } }
 </style>
@@ -127,8 +235,11 @@
   <span class="status-text" id="cLabel">Connecting...</span>
 
   <div class="sep"></div>
+  <select id="nsSelect"><option value="">Select Namespace...</option></select>
+  <button class="btn" id="loadNsBtn">Load NS</button>
   <button class="btn primary" id="startBtn" disabled>Start Capture</button>
   <button class="btn recording" id="stopBtn" style="display:none">Stop Capture</button>
+  <button class="btn" id="clearBtn" style="display:none">Clear</button>
 
   <div class="stats" id="stats"></div>
 </div>
@@ -144,6 +255,7 @@
   <select id="podFilter"><option value="all">All Services</option></select>
   <select id="reqidFilter"><option value="all">All Requests</option></select>
   <div class="sep"></div>
+  <button class="btn" id="hiddenBtn">Hidden</button>
   <button class="btn" id="hideTrace">Hide TRACE</button>
   <button class="btn ej" id="prevErr">&#9650; Err</button>
   <button class="btn ej" id="nextErr">&#9660; Err</button>
@@ -170,278 +282,15 @@
 <div class="lc" id="lc"></div>
 <div class="toast" id="toast"></div>
 
-<script>
-const AGENT_URL = 'ws://localhost:4040';
-const S = {
-  ws:null, lines:[], raw:[], filtered:[], errIdx:[], curErr:-1,
-  pods:new Set(), reqs:new Map(), flowNodes:[],
-  search:'', hideTrace:false, level:'all', pod:'all', req:'all',
-  autoScroll:true, capturing:false, start:null, buf:[], scheduled:false,
-};
+<!-- Trace Panel -->
+<div class="trace-panel" id="tracePanel">
+  <div class="tp-header">
+    <span class="tp-title" id="tpTitle">Flow Trace</span>
+    <button class="btn" id="tpClose">&times;</button>
+  </div>
+  <div class="tp-body" id="tpBody"></div>
+</div>
 
-const $=id=>document.getElementById(id);
-
-// ── Parse ─────────────────────
-const NX=/^(\S+)\s+(\S+)\s+(\S+)\s+-\s+-\s+\[([^\]]+)\]\s+"(\w+)\s+(\S+)\s+\S+"\s+(\d+)\s+(\d+)\s+"([^"]*)"\s+"([^"]*)"/;
-const SJ=/^(\S+)\s+(\S+)\s+(\{.+\})$/;
-const SP=/^([+-])\s+(\S+)\s+.\s+(\S+)$/;
-
-function parse(raw,i){
-  const t=raw.trimEnd(); if(!t)return null;
-  if(SP.test(t))return{type:'stern',idx:i,raw:t};
-  const nm=t.match(NX);
-  if(nm){const s=+nm[7];return{type:'http',pod:nm[1],container:nm[2],timestamp:nm[4],method:nm[5],path:nm[6],status:s,size:+nm[8],level:'HTTP',idx:i,raw:t};}
-  const jm=t.match(SJ);
-  if(jm){try{const j=JSON.parse(jm[3]),d=j.data||[];let msg='',fi=null;for(const x of d){if(typeof x==='string')msg+=(msg?' ':'')+x;else if(x&&x.file)fi=x;else if(x&&typeof x==='object')msg+=(msg?' ':'')+JSON.stringify(x);}return{type:'json',pod:jm[1],container:jm[2],timestamp:j.timestamp,level:(j.level||'INFO').toUpperCase(),reqId:j.req_id,msg,fileInfo:fi,data:j.data,json:j,idx:i,raw:t};}catch{}}
-  const tp=t.match(/^(\S+)\s+(\S+)\s+(.+)$/);
-  if(tp&&tp[1].startsWith('io-'))return{type:'plain',pod:tp[1],container:tp[2],msg:tp[3],level:tp[3].toLowerCase().includes('error')?'ERROR':tp[3].toLowerCase().includes('warn')?'WARN':'INFO',idx:i,raw:t};
-  return{type:'raw',msg:t,level:'INFO',idx:i,raw:t};
-}
-
-function extractFlow(lines){
-  const nodes=[],seen=new Set();
-  const nr=/\[([^\]]+)\]\s+(\S+)\s+-\s+Node\s+(\S+)\s+is\s+in\s+(\w+)\s+state(?:,\s+next\s+node\s+is\s+(\S+))?/;
-  const fr=/Failure from node\s+(\S+)\s+\(([^)]+)\)/;
-  for(const l of lines){if(l.type!=='json')continue;
-    const m=(l.msg||'').match(nr);if(m){const k=m[3]+'-'+m[4];if(!seen.has(k)){seen.add(k);nodes.push({node:m[3],state:m[4],next:m[5],lineIdx:l.idx,label:m[3]});}}
-    const fm=(l.msg||'').match(fr);if(fm){const k=fm[1]+'-f';if(!seen.has(k)){seen.add(k);nodes.push({node:fm[1],label:fm[2],state:'failed',lineIdx:l.idx});}}}
-  return nodes;
-}
-
-// ── Render helpers ────────────
-function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-function hiSearch(t,q){if(!q)return esc(t);try{const e=q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');return esc(t).replace(new RegExp('('+e+')','gi'),'<span class="hi">$1</span>');}catch{return esc(t);}}
-function shortPod(p){if(!p)return'';const m=p.match(/^io-(.+?)(?:-[a-f0-9]{6,})+/);return m?m[1]:p.length>22?p.slice(0,20)+'..':p;}
-function shortReq(r){return r?r.slice(0,8):'';}
-function fmtTs(ts){if(!ts)return'';try{return new Date(ts).toISOString().slice(11,23);}catch{return ts.slice(0,12);}}
-
-function lineHtml(l,q){
-  if(l.type==='stern')return'';
-  let c='ll';
-  if(l.level)c+=' l'+l.level;
-  if(l.type==='http'&&l.status>=500)c+=' h5';else if(l.type==='http'&&l.status>=400)c+=' h4';
-  if(l.msg&&/failure|fail|error/i.test(l.msg)&&l.level!=='TRACE')c+=' fl';
-  let h=`<div class="${c}" data-i="${l.idx}">`;
-  h+=`<span class="ln">${l.idx+1}</span>`;
-  h+=`<span class="lt">${l.timestamp?fmtTs(l.timestamp):''}</span>`;
-  h+=`<span class="lv ${l.level||''}">${l.level||''}</span>`;
-  h+=`<span class="lp" title="${esc(l.pod||'')}" data-pod="${esc(l.pod||'')}">${esc(shortPod(l.pod))}</span>`;
-  h+=`<span class="lr" title="${esc(l.reqId||'')}" data-req="${esc(l.reqId||'')}">${l.reqId?shortReq(l.reqId):''}</span>`;
-  if(l.type==='http'){const sc=l.status>=500?'s5':l.status>=400?'s4':l.status>=300?'s3':'s2';h+=`<span class="lm">${hiSearch(l.method+' '+l.path+' ',q)}<span class="hs ${sc}">${l.status}</span> ${l.size}B</span>`;}
-  else{const m=l.msg||l.raw||'';const d=m.length>500?m.slice(0,500)+'...':m;h+=`<span class="lm">${hiSearch(d,q)}${l.type==='json'&&l.data?`<span class="je" data-li="${l.idx}">[+]</span>`:''}</span>`;}
-  return h+'</div>';
-}
-
-function jsonDetailHtml(l){
-  const str=JSON.stringify(l.json||l.data,null,2).replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g,m=>{
-    let c='jn';if(/^"/.test(m))c=/:$/.test(m)?'jk':'js';else if(/true|false/.test(m))c='jb';else if(/null/.test(m))c='jl';return`<span class="${c}">${m}</span>`;});
-  return`<div class="jd" id="jd-${l.idx}">${str}</div>`;
-}
-
-// ── Filter / render ───────────
-function shouldShow(l){
-  if(!l||l.type==='stern')return false;
-  if(S.level!=='all'&&l.level!==S.level)return false;
-  if(S.hideTrace&&l.level==='TRACE')return false;
-  if(S.pod!=='all'&&l.pod!==S.pod)return false;
-  if(S.req!=='all'&&l.reqId!==S.req)return false;
-  if(S.search){try{if(!new RegExp(S.search,'i').test(l.raw||l.msg||''))return false;}catch{if(!(l.raw||l.msg||'').toLowerCase().includes(S.search.toLowerCase()))return false;}}
-  return true;
-}
-
-function rebuildFiltered(){
-  S.filtered=[];S.errIdx=[];S.curErr=-1;
-  for(let i=0;i<S.lines.length;i++){const l=S.lines[i];if(!shouldShow(l))continue;S.filtered.push(i);
-    if(l.level==='ERROR'||l.level==='FATAL'||(l.type==='http'&&l.status>=500)||(l.msg&&/failure|fail/i.test(l.msg)&&l.level!=='TRACE'))S.errIdx.push(i);}
-}
-
-function fullRender(){
-  const c=$('lc');let h='';for(const i of S.filtered)h+=lineHtml(S.lines[i],S.search);c.innerHTML=h;
-  c.classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';
-  updateStats();updateErrBanner();updateFlow();
-}
-
-function appendLive(l){
-  if(!shouldShow(l))return;
-  S.filtered.push(l.idx);
-  if(l.level==='ERROR'||l.level==='FATAL'||(l.type==='http'&&l.status>=500)||(l.msg&&/failure|fail/i.test(l.msg)&&l.level!=='TRACE'))S.errIdx.push(l.idx);
-  S.buf.push(l);
-  if(!S.scheduled){S.scheduled=true;requestAnimationFrame(flushBuf);}
-}
-
-function flushBuf(){
-  S.scheduled=false;if(!S.buf.length)return;
-  const c=$('lc');let h='';for(const l of S.buf)h+=lineHtml(l,S.search);c.insertAdjacentHTML('beforeend',h);S.buf=[];
-  if(S.autoScroll)c.scrollTop=c.scrollHeight;
-  updateStats();
-  if(S.filtered.length%50===0){updateFlow();updateErrBanner();}
-}
-
-function updateStats(){
-  const c={t:S.filtered.length,E:0,W:0,D:0,T:0,H:0};
-  for(const i of S.filtered){const l=S.lines[i];if(!l)continue;if(l.level==='ERROR'||l.level==='FATAL')c.E++;else if(l.level==='WARN')c.W++;else if(l.level==='DEBUG')c.D++;else if(l.level==='TRACE')c.T++;if(l.type==='http')c.H++;}
-  $('stats').innerHTML=`<span class="s"><span class="d to"></span>${c.t}</span>${c.E?`<span class="s"><span class="d er"></span>${c.E} err</span>`:''}${c.W?`<span class="s"><span class="d wr"></span>${c.W} warn</span>`:''}<span class="s"><span class="d db"></span>${c.D} dbg</span><span class="s"><span class="d tr"></span>${c.T} trc</span>${c.H?`<span class="s"><span class="d ht"></span>${c.H} http</span>`:''}`;
-  $('searchCount').textContent=S.search?`${S.filtered.length} matches`:'';
-}
-
-function updateErrBanner(){
-  const b=$('errBanner');
-  if(S.errIdx.length){
-    const sums=[];for(const i of S.errIdx.slice(0,3)){const l=S.lines[i];if(l.type==='http')sums.push(`${l.method} ${l.path} -> ${l.status}`);else if(l.msg)sums.push(l.msg.slice(0,80));}
-    b.textContent=`${S.errIdx.length} issue(s): ${sums.join(' | ')}`;b.classList.add('v');
-  }else b.classList.remove('v');
-}
-
-function updateFlow(){
-  S.flowNodes=extractFlow(S.lines.filter(Boolean));
-  const c=$('fnodes'),w=$('ftl');c.innerHTML='';
-  if(!S.flowNodes.length){w.classList.remove('v');return;}
-  w.classList.add('v');
-  S.flowNodes.forEach((n,i)=>{
-    if(i)c.insertAdjacentHTML('beforeend','<span class="farrow">-></span>');
-    const e=document.createElement('span');e.className=`fnode ${n.state}`;e.textContent=n.label||n.node;e.title=`${n.node} (${n.state})`;
-    e.addEventListener('click',()=>scrollTo(n.lineIdx));c.appendChild(e);
-  });
-}
-
-function populateFilters(){
-  const ps=$('podFilter'),rs=$('reqidFilter');
-  ps.innerHTML='<option value="all">All Services</option>';
-  for(const p of[...S.pods].sort()){const o=document.createElement('option');o.value=p;o.textContent=shortPod(p);ps.appendChild(o);}
-  rs.innerHTML='<option value="all">All Requests</option>';
-  for(const[id,ct]of[...S.reqs.entries()].sort((a,b)=>b[1]-a[1])){const o=document.createElement('option');o.value=id;o.textContent=`${shortReq(id)} (${ct})`;rs.appendChild(o);}
-}
-
-function scrollTo(idx){
-  const c=$('lc'),el=c.querySelector(`[data-i="${idx}"]`);
-  if(el){c.querySelectorAll('.hl').forEach(e=>e.classList.remove('hl'));el.classList.add('hl');el.scrollIntoView({behavior:'smooth',block:'center'});}
-}
-
-function jumpErr(dir){
-  if(!S.errIdx.length){toast('No errors');return;}
-  S.curErr=dir==='next'?(S.curErr+1)%S.errIdx.length:S.curErr<=0?S.errIdx.length-1:S.curErr-1;
-  scrollTo(S.errIdx[S.curErr]);toast(`Error ${S.curErr+1}/${S.errIdx.length}`);
-}
-
-function toast(m){const e=$('toast');e.textContent=m;e.classList.add('v');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('v'),2500);}
-
-// ── File load ─────────────────
-function loadFile(text){
-  S.lines=[];S.raw=text.split('\n');S.pods=new Set();S.reqs=new Map();
-  for(let i=0;i<S.raw.length;i++){const p=parse(S.raw[i],i);S.lines.push(p);if(p){if(p.pod)S.pods.add(p.pod);if(p.reqId)S.reqs.set(p.reqId,(S.reqs.get(p.reqId)||0)+1);}}
-  populateFilters();rebuildFiltered();fullRender();
-  if(S.errIdx.length)setTimeout(()=>{S.curErr=0;scrollTo(S.errIdx[0]);},300);
-  toast(`Loaded ${S.raw.length} lines`);
-}
-
-// ── Live line ─────────────────
-function addLive(raw){
-  const i=S.lines.length;S.raw.push(raw);const p=parse(raw,i);S.lines.push(p);
-  if(p){
-    if(p.pod){const had=S.pods.has(p.pod);S.pods.add(p.pod);if(!had)populateFilters();}
-    if(p.reqId){S.reqs.set(p.reqId,(S.reqs.get(p.reqId)||0)+1);if(S.lines.length%100===0)populateFilters();}
-    appendLive(p);
-  }
-}
-
-// ── WebSocket ─────────────────
-function connect(){
-  try{S.ws=new WebSocket(AGENT_URL);}catch{return setConn(false);}
-  S.ws.onopen=()=>setConn(true);
-  S.ws.onclose=()=>{setConn(false);setTimeout(connect,3000);};
-  S.ws.onerror=()=>{};
-  S.ws.onmessage=ev=>{
-    const m=JSON.parse(ev.data);
-    switch(m.type){
-      case'init':
-        if(m.auth&&m.auth.ok)$('cLabel').textContent=m.auth.arn?m.auth.arn.split('/').pop():'Authenticated';
-        if(m.capturing)setCap(true);
-        break;
-      case'capture-start':case'capture-state':
-        setCap(true,m.ns);
-        S.lines=[];S.raw=[];S.filtered=[];S.pods=new Set();S.reqs=new Map();S.errIdx=[];
-        $('lc').innerHTML='';$('lc').classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';
-        break;
-      case'log':addLive(m.line);break;
-      case'capture-stop':case'capture-end':
-        setCap(false);populateFilters();updateFlow();updateErrBanner();updateStats();
-        if(m.n!==undefined)toast(`Captured ${m.n} lines`);
-        if(S.errIdx.length)setTimeout(()=>{S.curErr=0;scrollTo(S.errIdx[0]);},500);
-        break;
-      case'stderr':if(!m.msg.includes('Experimental'))toast(m.msg.slice(0,80));break;
-      case'error':toast('Error: '+m.msg);break;
-      case'auth-status':
-        $('cLabel').textContent=m.ok?(m.arn?m.arn.split('/').pop():'Auth OK'):'Not authed';
-        $('startBtn').disabled=!m.ok;
-        break;
-    }
-  };
-}
-
-function send(m){if(S.ws&&S.ws.readyState===1)S.ws.send(JSON.stringify(m));}
-
-function setConn(ok){
-  $('cDot').className='dot '+(ok?'ok':'fail');
-  $('cLabel').textContent=ok?'Connected':'Disconnected — agent not running?';
-  if(ok)chrome.runtime.sendMessage({type:'badge',text:'',color:'#3fb950'});
-}
-
-let timerIv;
-function setCap(on,ns){
-  S.capturing=on;
-  $('startBtn').style.display=on?'none':'';$('stopBtn').style.display=on?'':'none';
-  const rb=$('recBanner');
-  if(on){rb.classList.add('v');S.start=Date.now();clearInterval(timerIv);
-    timerIv=setInterval(()=>{if(!S.capturing){clearInterval(timerIv);return;}const e=Math.floor((Date.now()-S.start)/1000);$('recInfo').textContent=`Capturing ${ns||''} — ${Math.floor(e/60)}:${String(e%60).padStart(2,'0')} — ${S.lines.length} lines`;},1000);
-    chrome.runtime.sendMessage({type:'badge',text:'REC',color:'#f85149'});
-  }else{rb.classList.remove('v');clearInterval(timerIv);chrome.runtime.sendMessage({type:'badge',text:'',color:'#3fb950'});}
-}
-
-// ── Events ────────────────────
-$('startBtn').addEventListener('click',()=>send({action:'start',ns:'io'})); // will be overridden by popup selection
-$('stopBtn').addEventListener('click',()=>send({action:'stop'}));
-
-let sto;$('searchInput').addEventListener('input',e=>{clearTimeout(sto);sto=setTimeout(()=>{S.search=e.target.value.trim();rebuildFiltered();fullRender();},200);});
-$('levelFilter').addEventListener('change',e=>{S.level=e.target.value;rebuildFiltered();fullRender();});
-$('podFilter').addEventListener('change',e=>{S.pod=e.target.value;rebuildFiltered();fullRender();});
-$('reqidFilter').addEventListener('change',e=>{S.req=e.target.value;rebuildFiltered();fullRender();});
-$('hideTrace').addEventListener('click',e=>{S.hideTrace=!S.hideTrace;e.target.classList.toggle('active',S.hideTrace);e.target.textContent=S.hideTrace?'Show TRACE':'Hide TRACE';rebuildFiltered();fullRender();});
-$('autoScroll').addEventListener('click',e=>{S.autoScroll=!S.autoScroll;e.target.textContent=`Auto-scroll: ${S.autoScroll?'ON':'OFF'}`;e.target.classList.toggle('active',S.autoScroll);});
-$('prevErr').addEventListener('click',()=>jumpErr('prev'));
-$('nextErr').addEventListener('click',()=>jumpErr('next'));
-$('errBanner').addEventListener('click',()=>jumpErr('next'));
-$('resetBtn').addEventListener('click',()=>{S.search='';S.hideTrace=false;S.level='all';S.pod='all';S.req='all';$('searchInput').value='';$('levelFilter').value='all';$('podFilter').value='all';$('reqidFilter').value='all';$('hideTrace').classList.remove('active');$('hideTrace').textContent='Hide TRACE';rebuildFiltered();fullRender();});
-$('exportBtn').addEventListener('click',()=>{const t=S.filtered.map(i=>S.raw[i]).join('\n');const b=new Blob([t],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`logs-${new Date().toISOString().slice(0,19).replace(/[:.]/g,'-')}.txt`;a.click();toast('Exported');});
-$('openFile').addEventListener('click',()=>$('fileInput').click());
-$('fileInput').addEventListener('change',e=>{const f=e.target.files[0];if(f){const r=new FileReader();r.onload=ev=>loadFile(ev.target.result);r.readAsText(f);}});
-
-// Drop zone
-const dz=$('dz');
-dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('over');});
-dz.addEventListener('dragleave',()=>dz.classList.remove('over'));
-dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('over');const f=e.dataTransfer.files[0];if(f){const r=new FileReader();r.onload=ev=>loadFile(ev.target.result);r.readAsText(f);}});
-dz.addEventListener('click',()=>$('fileInput').click());
-document.body.addEventListener('dragover',e=>e.preventDefault());
-document.body.addEventListener('drop',e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f){const r=new FileReader();r.onload=ev=>loadFile(ev.target.result);r.readAsText(f);}});
-
-// Log container clicks
-$('lc').addEventListener('click',e=>{
-  const pod=e.target.closest('.lp');if(pod&&pod.dataset.pod){S.pod=pod.dataset.pod;$('podFilter').value=pod.dataset.pod;rebuildFiltered();fullRender();toast(`Filtered: ${shortPod(pod.dataset.pod)}`);return;}
-  const req=e.target.closest('.lr');if(req&&req.dataset.req){S.req=req.dataset.req;$('reqidFilter').value=req.dataset.req;rebuildFiltered();fullRender();toast(`Request: ${shortReq(req.dataset.req)}`);return;}
-  const je=e.target.closest('.je');if(je){const i=+je.dataset.li;const ex=document.getElementById('jd-'+i);if(ex){ex.classList.toggle('v');je.textContent=ex.classList.contains('v')?'[-]':'[+]';}else{const l=S.lines[i];if(l){je.closest('.ll').insertAdjacentHTML('afterend',jsonDetailHtml(l));document.getElementById('jd-'+i).classList.add('v');je.textContent='[-]';}}return;}
-});
-
-// Keyboard
-document.addEventListener('keydown',e=>{
-  if((e.ctrlKey||e.metaKey)&&e.key==='f'){e.preventDefault();$('searchInput').focus();}
-  if(e.key==='Escape'){$('searchInput').blur();if(S.search){S.search='';$('searchInput').value='';rebuildFiltered();fullRender();}}
-  if((e.ctrlKey||e.metaKey)&&e.key==='e'){e.preventDefault();jumpErr(e.shiftKey?'prev':'next');}
-});
-
-// Paste
-document.addEventListener('paste',e=>{if(e.target.tagName==='INPUT')return;const t=e.clipboardData.getData('text');if(t&&t.length>50){e.preventDefault();loadFile(t);}});
-
-connect();
-</script>
+<script src="viewer.js"></script>
 </body>
 </html>

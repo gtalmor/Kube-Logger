@@ -4,6 +4,7 @@ const AGENT_URL = 'ws://localhost:4040';
 let ws = null;
 let connected = false;
 let capturing = false;
+let hasCaptureData = false;
 
 const $ = id => document.getElementById(id);
 
@@ -31,30 +32,41 @@ function connect() {
     switch (msg.type) {
       case 'init':
         if (msg.profiles) populateProfiles(msg.profiles);
-        if (msg.auth && msg.auth.ok) setAuth(true, msg.auth.arn);
+        if (msg.auth && (msg.auth.ok || msg.auth.authenticated)) {
+          setAuth(true, msg.auth.arn);
+          // Load cached namespaces instantly, then refresh from server
+          chrome.storage.local.get('cachedNs', d => {
+            if (d.cachedNs && d.cachedNs.length) populateNs(d.cachedNs);
+            send({ action: 'namespaces' });
+          });
+        }
         if (msg.capturing) setCaptureState(true);
         break;
 
       case 'auth-status':
-        setAuth(msg.ok, msg.arn, msg.err);
-        if (msg.ok) $('loadNs').disabled = false;
+        setAuth(msg.ok || msg.authenticated, msg.arn, msg.err || msg.error);
+        if (msg.ok || msg.authenticated) $('loadNs').disabled = false;
         break;
 
       case 'auth-progress':
-        $('authInfo').textContent = msg.msg;
+        $('authInfo').textContent = msg.msg || msg.message;
         break;
 
       case 'auth-result':
-        $('authInfo').textContent = msg.msg;
-        if (msg.ok) $('loadNs').disabled = false;
+        $('authInfo').textContent = msg.msg || msg.message;
+        if (msg.ok || msg.success) $('loadNs').disabled = false;
         break;
 
-      case 'namespaces':
-        populateNs(msg.list);
+      case 'namespaces': {
+        const nsList = msg.list || msg.namespaces || [];
+        if (nsList.length) chrome.storage.local.set({ cachedNs: nsList });
+        populateNs(nsList);
         break;
+      }
 
       case 'capture-start':
-        setCaptureState(true, msg.ns);
+      case 'capture-started':
+        setCaptureState(true, msg.ns || msg.namespace);
         break;
 
       case 'log':
@@ -64,9 +76,21 @@ function connect() {
         break;
 
       case 'capture-stop':
+      case 'capture-stopped':
       case 'capture-end':
+      case 'capture-ended':
         setCaptureState(false);
-        if (msg.n !== undefined) $('captureInfo').innerHTML = `Done: <span class="num">${msg.n}</span> lines`;
+        { const count = msg.n ?? msg.lineCount;
+          if (count !== undefined) $('captureInfo').innerHTML = `Done: <span class="num">${count}</span> lines`; }
+        break;
+
+      case 'cleared':
+        hasCaptureData = false;
+        capturing = false;
+        $('captureInfo').textContent = '';
+        $('clearBtn').style.display = 'none';
+        $('startBtn').style.display = '';
+        $('stopBtn').style.display = 'none';
         break;
     }
   };
@@ -89,14 +113,18 @@ function setCaptureState(active, ns) {
   capturing = active;
   $('startBtn').style.display = active ? 'none' : '';
   $('stopBtn').style.display = active ? '' : 'none';
-  $('startBtn').disabled = !$('ns').value;
+  $('clearBtn').style.display = active ? 'none' : (hasCaptureData ? '' : 'none');
 
   if (active) {
+    hasCaptureData = true;
     chrome.runtime.sendMessage({ type: 'badge', text: 'REC', color: '#f85149' });
     $('captureInfo').textContent = `Capturing ${ns || ''}...`;
   } else {
     chrome.runtime.sendMessage({ type: 'badge', text: '', color: '#3fb950' });
+    if (hasCaptureData) $('clearBtn').style.display = '';
   }
+  // Always re-check if start should be enabled based on namespace selection
+  $('startBtn').disabled = !$('ns').value;
 }
 
 function populateProfiles(profiles) {
@@ -145,16 +173,18 @@ $('profile').addEventListener('change', e => {
 });
 
 $('checkBtn').addEventListener('click', () => {
+  if (!connected) { $('authInfo').textContent = 'Agent not connected'; return; }
   const p = $('profile').value;
-  if (!p) return;
+  if (!p) { $('authInfo').textContent = 'Select a profile first'; return; }
   send({ action: 'check-auth', profile: p });
   $('authDot').className = 'dot pending';
   $('authInfo').textContent = 'Checking...';
 });
 
 $('loginBtn').addEventListener('click', () => {
+  if (!connected) { $('authInfo').textContent = 'Agent not connected'; return; }
   const p = $('profile').value;
-  if (!p) return;
+  if (!p) { $('authInfo').textContent = 'Select a profile first'; return; }
   send({ action: 'login', profile: p });
   $('authDot').className = 'dot pending';
   $('authInfo').textContent = 'Opening SSO in browser...';
@@ -179,6 +209,13 @@ $('startBtn').addEventListener('click', () => {
 });
 
 $('stopBtn').addEventListener('click', () => send({ action: 'stop' }));
+
+$('clearBtn').addEventListener('click', () => {
+  send({ action: 'clear' });
+  hasCaptureData = false;
+  $('captureInfo').textContent = '';
+  $('clearBtn').style.display = 'none';
+});
 
 $('openViewer').addEventListener('click', e => {
   e.preventDefault();

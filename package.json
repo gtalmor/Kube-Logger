@@ -5,7 +5,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js --open"
+    "dev": "nodemon --watch server.js --watch public server.js"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   },
   "dependencies": {
     "express": "^4.21.0",

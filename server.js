@@ -245,7 +245,7 @@ wss.on('connection', (ws) => {
   clients.add(ws);
 
   // Send current state
-  ws.send(JSON.stringify({ type: 'init', auth: authState, capturing: !!currentCapture, tool: LOG_TOOL }));
+  ws.send(JSON.stringify({ type: 'init', auth: authState, capturing: !!currentCapture, tool: LOG_TOOL, profiles: Object.keys(CPL_CLUSTERS) }));
 
   // If capturing, send all existing lines
   if (currentCapture) {
@@ -287,9 +287,10 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'namespaces':
         case 'get-namespaces': {
           const namespaces = await getNamespaces();
-          ws.send(JSON.stringify({ type: 'namespaces', namespaces }));
+          ws.send(JSON.stringify({ type: 'namespaces', list: namespaces, namespaces }));
           break;
         }
 
@@ -299,11 +300,19 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'start':
         case 'start-capture': {
-          startCapture(msg.namespace, ws);
+          startCapture(msg.namespace || msg.ns, ws);
           break;
         }
 
+        case 'clear': {
+          if (currentCapture) stopCapture();
+          broadcastWs({ type: 'cleared' });
+          break;
+        }
+
+        case 'stop':
         case 'stop-capture': {
           const result = stopCapture();
           broadcastWs({ type: 'capture-stopped', ...result });
@@ -333,6 +342,9 @@ wss.on('connection', (ws) => {
 });
 
 // ---- HTTP Routes ----
+// Serve the extension viewer as the main web UI (single source of truth)
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'extension', 'viewer.html')));
+app.use('/viewer.js', express.static(path.join(__dirname, 'extension', 'viewer.js')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/status', async (req, res) => {
