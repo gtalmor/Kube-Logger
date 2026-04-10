@@ -1,0 +1,14 @@
+{
+  "name": "io-log-viewer",
+  "version": "1.0.0",
+  "description": "Live Kubernetes log viewer with auth management, capture controls, and visual analysis",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js --open"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  }
+}
