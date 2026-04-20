@@ -1327,7 +1327,14 @@ function connect(){
         $('lc').innerHTML='';$('lc').classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';
         Drawer.onCaptureStart(m);
         break;
-      case'log':try{addLive(m.line,m.ns);}catch(e){console.error('addLive error:',e);}Drawer.onLog(m);break;
+      case'log':
+        // If log traffic beat the init response (common after a hard refresh
+        // while a capture is already streaming), reveal the log area now so
+        // the inserted lines aren't stuck in a display:none container.
+        if(!$('lc').classList.contains('v')){$('lc').classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';}
+        try{addLive(m.line,m.ns);}catch(e){console.error('addLive error:',e);}
+        Drawer.onLog(m);
+        break;
       case'cleared':clearState();Drawer.onCleared();break;
       case'ns-added':{
         const arr=Array.isArray(m.ns)?m.ns:[m.ns];
