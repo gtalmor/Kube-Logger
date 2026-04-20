@@ -3,1406 +3,379 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IO Log Viewer</title>
+<title>Kube Logger — Viewer</title>
 <style>
   :root {
-    --bg: #0d1117;
-    --bg-secondary: #161b22;
-    --bg-tertiary: #21262d;
-    --border: #30363d;
-    --text: #c9d1d9;
-    --text-muted: #6e7681;
-    --text-bright: #f0f6fc;
-    --accent: #58a6ff;
-    --error: #f85149;
-    --warn: #d29922;
-    --info: #58a6ff;
-    --debug: #8b949e;
-    --trace: #484f58;
+    --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
+    --text: #c9d1d9; --muted: #6e7681; --bright: #f0f6fc;
+    --accent: #58a6ff; --error: #f85149; --warn: #d29922;
+    --info: #58a6ff; --debug: #8b949e; --trace: #484f58;
     --success: #3fb950;
-    --http-500: #f85149;
-    --http-400: #d29922;
-    --http-300: #58a6ff;
-    --http-200: #3fb950;
-    --recording: #f85149;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'SF Mono','Cascadia Code','Fira Code','JetBrains Mono','Consolas',monospace; background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+
+  /* ── Top bar ── */
+  .bar { background:var(--bg2); border-bottom:1px solid var(--border); padding:8px 20px; display:flex; align-items:center; gap:10px; flex-shrink:0; flex-wrap:wrap; }
+  .bar h1 { font-size:13px; font-weight:600; color:var(--bright); white-space:nowrap; }
+  .dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+  .dot.ok { background:var(--success); } .dot.fail { background:var(--error); } .dot.pending { background:var(--warn); animation:pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.4} }
+  @keyframes rec { 0%,100%{opacity:1}50%{opacity:.5} }
+
+  .status-text { font-size:11px; color:var(--muted); }
+  .stats { display:flex; gap:10px; font-size:11px; color:var(--muted); margin-left:auto; }
+  .stats .s { display:flex; align-items:center; gap:3px; }
+  .stats .s .d { width:7px; height:7px; border-radius:50%; }
+  .stats .s .d.er { background:var(--error); } .stats .s .d.wr { background:var(--warn); } .stats .s .d.db { background:var(--debug); } .stats .s .d.tr { background:var(--trace); } .stats .s .d.ht { background:var(--error); } .stats .s .d.to { background:var(--accent); }
+
+  /* Namespace legend */
+  .ns-legend { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .ns-chip { display:inline-flex; align-items:center; gap:5px; padding:2px 7px; background:var(--bg3); border:1px solid var(--border); border-radius:10px; font-size:10px; color:var(--text); }
+  .ns-chip:hover { border-color:var(--accent); }
+  .ns-chip .ns-ct { color:var(--muted); font-size:9px; }
+  .ns-chip input[type=color] {
+    width:16px; height:14px; padding:0;
+    border:1px solid var(--border); border-radius:3px;
+    background:transparent; cursor:pointer; flex-shrink:0;
+  }
+  .ns-chip input[type=color]::-webkit-color-swatch-wrapper { padding:0; }
+  .ns-chip input[type=color]::-webkit-color-swatch { border:none; border-radius:2px; }
+
+  /* Per-line namespace indicator:
+     - full-row background tint applied via background-image (gradient) so it
+       stacks ON TOP of any level-specific background-color (ERROR red etc.)
+       while leaving text fully readable
+     - 3px solid left stripe for a hard visual anchor */
+  .ll {
+    position:relative;
+    background-image: linear-gradient(var(--ns-bg,transparent), var(--ns-bg,transparent));
+  }
+  .ll .ll-ns-stripe {
+    position:absolute; left:0; top:0; bottom:0; width:3px;
+    background:var(--ns-color,transparent);
+    pointer-events:none;
   }
 
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-
-  body {
-    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
-    background: var(--bg);
-    color: var(--text);
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-
-  /* ---- Top Bar ---- */
-  .top-bar {
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border);
-    padding: 10px 20px;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    flex-shrink: 0;
-  }
-
-  .top-bar h1 {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-bright);
-    white-space: nowrap;
-  }
-
-  .connection-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--error);
-    flex-shrink: 0;
-  }
-
-  .connection-dot.connected { background: var(--success); }
-  .connection-dot.auth-ok { background: var(--success); }
-  .connection-dot.auth-fail { background: var(--error); }
-  .connection-dot.auth-checking { background: var(--warn); animation: pulse 1s infinite; }
-
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-  @keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-
-  .auth-status {
-    font-size: 11px;
-    color: var(--text-muted);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .stats {
-    display: flex;
-    gap: 12px;
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-left: auto;
-  }
-
-  .stat { display: flex; align-items: center; gap: 4px; }
-
-  .stat .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    display: inline-block;
-  }
-
-  .stat .dot.error { background: var(--error); }
-  .stat .dot.warn { background: var(--warn); }
-  .stat .dot.debug { background: var(--debug); }
-  .stat .dot.trace { background: var(--trace); }
-  .stat .dot.total { background: var(--accent); }
-  .stat .dot.http { background: var(--http-500); }
-
-  /* ---- Control Bar ---- */
-  .control-bar {
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border);
-    padding: 8px 20px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-shrink: 0;
-  }
-
-  select, .btn, input[type="text"] {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-family: inherit;
-    font-size: 12px;
-    padding: 6px 10px;
-    border-radius: 6px;
-    cursor: pointer;
-    outline: none;
-  }
-
-  select:focus, .btn:focus, input[type="text"]:focus { border-color: var(--accent); }
-  select:hover, .btn:hover { background: var(--bg-tertiary); }
-
-  .btn.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
-
-  .btn.primary {
-    background: var(--accent);
-    color: var(--bg);
-    border-color: var(--accent);
-    font-weight: 600;
-  }
-
-  .btn.primary:hover { background: #79b8ff; }
-
-  .btn.danger {
-    background: rgba(248, 81, 73, 0.15);
-    border-color: var(--error);
-    color: var(--error);
-    font-weight: 600;
-  }
-
-  .btn.danger:hover { background: rgba(248, 81, 73, 0.25); }
-
-  .btn.recording {
-    background: var(--recording);
-    color: white;
-    border-color: var(--recording);
-    animation: rec-pulse 1.5s infinite;
-  }
-
-  .btn.error-jump {
-    background: rgba(248, 81, 73, 0.15);
-    border-color: var(--error);
-    color: var(--error);
-  }
-
-  .btn.error-jump:hover { background: rgba(248, 81, 73, 0.25); }
-
-  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  .separator { width: 1px; height: 24px; background: var(--border); flex-shrink: 0; }
-
-  /* ---- Filter Bar ---- */
-  .filter-bar {
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border);
-    padding: 8px 20px;
-    display: none;
-    align-items: center;
-    gap: 10px;
-    flex-shrink: 0;
-    flex-wrap: wrap;
-  }
-
-  .filter-bar.visible { display: flex; }
-
-  .search-box {
-    display: flex;
-    align-items: center;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0 10px;
-    flex: 1;
-    min-width: 200px;
-    max-width: 400px;
-  }
-
-  .search-box:focus-within { border-color: var(--accent); }
-  .search-box svg { flex-shrink: 0; color: var(--text-muted); }
-
-  .search-box input {
-    background: none;
-    border: none;
-    color: var(--text);
-    font-family: inherit;
-    font-size: 12px;
-    padding: 6px 8px;
-    width: 100%;
-    outline: none;
-  }
-
-  .search-box input::placeholder { color: var(--text-muted); }
-  .search-count { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
-
-  /* ---- Recording Banner ---- */
-  .recording-banner {
-    background: rgba(248, 81, 73, 0.08);
-    border-bottom: 1px solid rgba(248, 81, 73, 0.3);
-    padding: 6px 20px;
-    font-size: 12px;
-    color: var(--error);
-    display: none;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-
-  .recording-banner.visible { display: flex; }
-
-  .rec-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--recording);
-    animation: rec-pulse 1s infinite;
-    flex-shrink: 0;
-  }
-
-  /* ---- Error Banner ---- */
-  .error-banner {
-    background: rgba(248, 81, 73, 0.08);
-    border-bottom: 1px solid rgba(248, 81, 73, 0.3);
-    padding: 8px 20px;
-    font-size: 12px;
-    color: var(--error);
-    display: none;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-
-  .error-banner.visible { display: block; }
-  .error-banner:hover { background: rgba(248, 81, 73, 0.12); }
-
-  /* ---- Flow Timeline ---- */
-  .flow-timeline {
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border);
-    padding: 10px 20px;
-    flex-shrink: 0;
-    display: none;
-    overflow-x: auto;
-  }
-
-  .flow-timeline.visible { display: block; }
-
-  .flow-timeline-label { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
-
-  .flow-nodes { display: flex; align-items: center; gap: 0; font-size: 11px; }
-
-  .flow-node {
-    padding: 4px 10px;
-    border-radius: 4px;
-    cursor: pointer;
-    white-space: nowrap;
-    border: 1px solid var(--border);
-    background: var(--bg);
-  }
-
-  .flow-node:hover { border-color: var(--accent); }
-  .flow-node.done { border-color: var(--success); color: var(--success); }
-  .flow-node.process { border-color: var(--accent); color: var(--accent); }
-  .flow-node.failed { border-color: var(--error); color: var(--error); background: rgba(248,81,73,0.1); }
-
-  .flow-arrow { color: var(--text-muted); padding: 0 4px; font-size: 14px; }
-
-  /* ---- Welcome Screen ---- */
-  .welcome {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 20px;
-    padding: 40px;
-  }
-
-  .welcome.hidden { display: none; }
-
-  .welcome h2 { font-size: 18px; color: var(--text-bright); font-weight: 600; }
-  .welcome p { font-size: 13px; color: var(--text-muted); text-align: center; max-width: 500px; line-height: 1.6; }
-
-  .welcome .step-list {
-    text-align: left;
-    font-size: 13px;
-    color: var(--text);
-    line-height: 2;
-  }
-
-  .welcome .step-list .step-num {
-    display: inline-block;
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: var(--bg);
-    text-align: center;
-    line-height: 24px;
-    font-size: 11px;
-    font-weight: 700;
-    margin-right: 8px;
-  }
-
-  .drop-zone-mini {
-    border: 2px dashed var(--border);
-    border-radius: 8px;
-    padding: 16px 24px;
-    cursor: pointer;
-    font-size: 12px;
-    color: var(--text-muted);
-    text-align: center;
-    transition: all 0.2s;
-    margin-top: 8px;
-  }
-
-  .drop-zone-mini:hover, .drop-zone-mini.drag-over {
-    border-color: var(--accent);
-    background: rgba(88, 166, 255, 0.05);
-  }
-
-  /* ---- Log Container ---- */
-  .log-container {
-    flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
-    display: none;
-    font-size: 12px;
-    line-height: 1.6;
-  }
-
-  .log-container.visible { display: block; }
-
-  .log-line {
-    padding: 1px 20px;
-    display: flex;
-    border-bottom: 1px solid transparent;
-    white-space: pre-wrap;
-    word-break: break-all;
-  }
-
-  .log-line:hover { background: rgba(255,255,255,0.03); }
-
-  .log-line.level-ERROR, .log-line.level-FATAL {
-    background: rgba(248, 81, 73, 0.06);
-    border-bottom-color: rgba(248, 81, 73, 0.1);
-  }
-
-  .log-line.level-WARN {
-    background: rgba(210, 153, 34, 0.06);
-    border-bottom-color: rgba(210, 153, 34, 0.1);
-  }
-
-  .log-line.level-TRACE { opacity: 0.45; }
-  .log-line.level-TRACE:hover { opacity: 0.8; }
-
-  .log-line.http-500 { background: rgba(248, 81, 73, 0.1); border-bottom-color: rgba(248, 81, 73, 0.2); }
-  .log-line.http-400 { background: rgba(210, 153, 34, 0.06); }
-  .log-line.search-match { background: rgba(88, 166, 255, 0.1); }
-  .log-line.failure-line { background: rgba(248, 81, 73, 0.08); border-left: 3px solid var(--error); }
-  .log-line.highlight { background: rgba(88, 166, 255, 0.15); border-left: 3px solid var(--accent); }
-  .log-line.hidden { display: none; }
-
-  .line-no {
-    color: var(--trace);
-    min-width: 48px;
-    text-align: right;
-    padding-right: 12px;
-    user-select: none;
-    flex-shrink: 0;
-  }
-
-  .line-ts {
-    color: var(--text-muted);
-    min-width: 100px;
-    flex-shrink: 0;
-    padding-right: 8px;
-  }
-
-  .line-level { min-width: 52px; flex-shrink: 0; padding-right: 8px; font-weight: 600; }
-  .line-level.ERROR, .line-level.FATAL { color: var(--error); }
-  .line-level.WARN { color: var(--warn); }
-  .line-level.INFO { color: var(--info); }
-  .line-level.DEBUG { color: var(--debug); }
-  .line-level.TRACE { color: var(--trace); }
-  .line-level.HTTP { color: var(--text-muted); }
-
-  .line-pod {
-    color: var(--text-muted);
-    min-width: 120px;
-    max-width: 220px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex-shrink: 0;
-    padding-right: 8px;
-    cursor: pointer;
-  }
-
-  .line-pod:hover { color: var(--accent); }
-
-  .line-reqid {
-    color: var(--accent);
-    opacity: 0.7;
-    cursor: pointer;
-    flex-shrink: 0;
-    padding-right: 8px;
-    min-width: 80px;
-    font-size: 11px;
-  }
-
-  .line-reqid:hover { opacity: 1; text-decoration: underline; }
-
-  .line-msg { flex: 1; color: var(--text); min-width: 0; }
-
-  .line-msg .highlight-text {
-    background: rgba(210, 153, 34, 0.4);
-    color: var(--text-bright);
-    border-radius: 2px;
-    padding: 0 2px;
-  }
-
-  .line-http-status { font-weight: 700; padding: 0 4px; border-radius: 3px; }
-  .line-http-status.s5xx { color: var(--http-500); background: rgba(248,81,73,0.15); }
-  .line-http-status.s4xx { color: var(--http-400); background: rgba(210,153,34,0.15); }
-  .line-http-status.s3xx { color: var(--http-300); }
-  .line-http-status.s2xx { color: var(--http-200); }
-
-  /* JSON detail */
-  .json-expand { cursor: pointer; color: var(--accent); opacity: 0.6; margin-left: 4px; font-size: 10px; }
-  .json-expand:hover { opacity: 1; }
-
-  .json-detail {
-    display: none;
-    padding: 8px 20px 8px 100px;
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border);
-    font-size: 11px;
-    white-space: pre-wrap;
-    word-break: break-all;
-    color: var(--text-muted);
-  }
-
-  .json-detail.visible { display: block; }
-  .json-detail .json-key { color: var(--accent); }
-  .json-detail .json-str { color: var(--success); }
-  .json-detail .json-num { color: var(--warn); }
-  .json-detail .json-bool { color: #d2a8ff; }
-  .json-detail .json-null { color: var(--error); }
-
-  /* Toast */
-  .toast {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    padding: 10px 16px;
-    border-radius: 8px;
-    font-size: 12px;
-    color: var(--text);
-    z-index: 1000;
-    opacity: 0;
-    transform: translateY(10px);
-    transition: all 0.3s;
-    pointer-events: none;
-  }
-
-  .toast.visible { opacity: 1; transform: translateY(0); }
-
-  /* Scrollbar */
-  ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-track { background: var(--bg); }
-  ::-webkit-scrollbar-thumb { background: var(--bg-tertiary); border-radius: 4px; }
-  ::-webkit-scrollbar-thumb:hover { background: var(--border); }
-
-  @media (max-width: 900px) {
-    .line-pod { display: none; }
-    .line-reqid { display: none; }
-  }
+  /* ── Controls ── */
+  select,.btn,input[type=text] { background:var(--bg); border:1px solid var(--border); color:var(--text); font-family:inherit; font-size:12px; padding:5px 10px; border-radius:5px; cursor:pointer; outline:none; }
+  select:focus,.btn:focus,input[type=text]:focus { border-color:var(--accent); }
+  select:hover,.btn:hover { background:var(--bg3); }
+  .btn.active { background:var(--accent); color:var(--bg); border-color:var(--accent); }
+  .btn.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
+  .btn.danger { background:rgba(248,81,73,.15); border-color:var(--error); color:var(--error); font-weight:600; }
+  .btn.recording { background:var(--error); color:white; border-color:var(--error); animation:rec 1.5s infinite; }
+  .btn.ej { background:rgba(248,81,73,.12); border-color:var(--error); color:var(--error); }
+  .btn:disabled { opacity:.35; cursor:not-allowed; }
+  .sep { width:1px; height:22px; background:var(--border); flex-shrink:0; }
+
+  .search-box { display:flex; align-items:center; background:var(--bg); border:1px solid var(--border); border-radius:5px; padding:0 8px; flex:1; min-width:180px; max-width:360px; }
+  .search-box:focus-within { border-color:var(--accent); }
+  .search-box svg { flex-shrink:0; color:var(--muted); }
+  .search-box input { background:none; border:none; color:var(--text); font-family:inherit; font-size:12px; padding:5px 6px; width:100%; outline:none; }
+  .search-box input::placeholder { color:var(--muted); }
+  .sc { font-size:10px; color:var(--muted); white-space:nowrap; }
+
+  /* ── Banners ── */
+  .rec-banner { background:rgba(248,81,73,.06); border-bottom:1px solid rgba(248,81,73,.25); padding:5px 20px; font-size:11px; color:var(--error); display:none; align-items:center; gap:6px; flex-shrink:0; }
+  .rec-banner.v { display:flex; }
+  .rec-dot { width:9px; height:9px; border-radius:50%; background:var(--error); animation:rec 1s infinite; flex-shrink:0; }
+  .err-banner { background:rgba(248,81,73,.06); border-bottom:1px solid rgba(248,81,73,.25); padding:6px 20px; font-size:11px; color:var(--error); display:none; cursor:pointer; flex-shrink:0; }
+  .err-banner.v { display:block; }
+  .err-banner:hover { background:rgba(248,81,73,.1); }
+
+  /* ── Flow timeline ── */
+  .ftl { background:var(--bg2); border-bottom:1px solid var(--border); padding:8px 20px; flex-shrink:0; display:none; overflow-x:auto; }
+  .ftl.v { display:block; }
+  .ftl-label { font-size:10px; color:var(--muted); margin-bottom:4px; }
+  .fnodes { display:flex; align-items:center; font-size:11px; }
+  .fnode { padding:3px 8px; border-radius:4px; cursor:pointer; white-space:nowrap; border:1px solid var(--border); background:var(--bg); margin:0 1px; }
+  .fnode:hover { border-color:var(--accent); background:var(--bg3); }
+  .fnode.done { border-color:var(--success); color:var(--success); }
+  .fnode.post { border-color:var(--success); color:var(--success); }
+  .fnode.process { border-color:var(--accent); color:var(--accent); }
+  .fnode.pre { border-color:var(--warn); color:var(--warn); }
+  .fnode.failed { border-color:var(--error); color:var(--error); background:rgba(248,81,73,.08); }
+  .farrow { color:var(--muted); padding:0 2px; font-size:12px; }
+  .farrow.fsep { color:var(--border); font-weight:700; padding:0 6px; }
+  .fflow-label { font-size:10px; color:var(--accent); background:rgba(88,166,255,.1); padding:2px 6px; border-radius:3px; margin-right:4px; white-space:nowrap; cursor:pointer; display:inline-flex; align-items:center; gap:4px; }
+  .fflow-label:hover { background:rgba(88,166,255,.2); }
+  .fflow-hide { opacity:0; font-size:13px; color:var(--muted); cursor:pointer; transition:opacity .15s; } .fflow-label:hover .fflow-hide { opacity:.6; } .fflow-hide:hover { opacity:1!important; color:var(--error); }
+  .fhidden-badge { font-size:10px; color:var(--muted); background:var(--bg3); padding:2px 8px; border-radius:3px; cursor:pointer; border:1px solid var(--border); } .fhidden-badge:hover { border-color:var(--accent); color:var(--accent); }
+  .hp-section-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; padding:8px 14px 4px; }
+  .hp-flow-icon { color:var(--accent); flex-shrink:0; font-size:8px; }
+  .hp-exec-id { font-size:10px; color:var(--muted); }
+
+  /* Node popover */
+  .node-pop { position:fixed; z-index:200; background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:10px 14px; min-width:240px; max-width:380px; box-shadow:0 4px 16px rgba(0,0,0,.5); font-size:12px; }
+  .np-row { display:flex; justify-content:space-between; padding:3px 0; gap:12px; }
+  .np-label { color:var(--muted); flex-shrink:0; }
+  .np-val { color:var(--text); text-align:right; word-break:break-all; }
+  .np-val em { color:var(--accent); font-style:normal; }
+  .np-state-done { color:var(--success); } .np-state-process { color:var(--accent); } .np-state-pre { color:var(--warn); } .np-state-failed { color:var(--error); }
+  .np-fail { color:var(--error); font-weight:600; }
+  .np-link { color:var(--accent); cursor:pointer; } .np-link:hover { text-decoration:underline; }
+  .np-actions { display:flex; gap:6px; margin-top:8px; padding-top:8px; border-top:1px solid var(--border); }
+  .np-btn { padding:4px 10px; background:var(--bg3); border:1px solid var(--border); border-radius:4px; cursor:pointer; color:var(--text); font-size:11px; }
+  .np-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .np-divider { border-top:1px solid var(--border); margin:8px 0; }
+  .np-section-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; }
+  .np-path { display:flex; flex-wrap:wrap; align-items:center; gap:1px; margin-bottom:4px; }
+  .np-path-node { padding:2px 6px; border-radius:3px; font-size:10px; background:var(--bg); border:1px solid var(--border); color:var(--text); white-space:nowrap; }
+  .np-path-node.np-done { border-color:var(--success); color:var(--success); }
+  .np-path-node.np-nested { border-color:var(--accent); color:var(--accent); }
+  .np-path-node.np-path-fail { border-color:var(--error); color:var(--error); background:rgba(248,81,73,.1); font-weight:600; }
+  .np-path-arrow { color:var(--muted); font-size:10px; padding:0 1px; }
+
+  /* Failure tag in log lines */
+  .lfail { cursor:pointer; display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; border:1px solid var(--error); background:rgba(248,81,73,.1); color:var(--error); }
+  .lfail:hover { background:rgba(248,81,73,.2); }
+  .lfail-id { font-size:10px; opacity:.6; }
+  .lfail-hint { font-size:9px; opacity:.4; font-weight:400; }
+
+  /* ── Welcome ── */
+  .welcome { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:40px; }
+  .welcome.h { display:none; }
+  .welcome h2 { font-size:16px; color:var(--bright); }
+  .welcome p { font-size:12px; color:var(--muted); text-align:center; max-width:460px; line-height:1.7; }
+  .dz { border:2px dashed var(--border); border-radius:8px; padding:14px 20px; cursor:pointer; font-size:12px; color:var(--muted); text-align:center; transition:all .2s; }
+  .dz:hover,.dz.over { border-color:var(--accent); background:rgba(88,166,255,.04); }
+
+  /* ── Log container ── */
+  .lc { flex:1; overflow-y:auto; overflow-x:hidden; display:none; font-size:12px; line-height:1.6; }
+  .lc.v { display:block; }
+
+  /* NOTE: use background-color (not `background:` shorthand) everywhere so we don't
+     wipe out the ns tint gradient (.ll { background-image: ... }) that layers on top. */
+  .ll { padding:1px 20px; display:flex; border-bottom:1px solid transparent; white-space:pre-wrap; word-break:break-all; }
+  .ll:hover { background-color:rgba(255,255,255,.03); }
+  .ll.lERROR,.ll.lFATAL { background-color:rgba(248,81,73,.06); border-bottom-color:rgba(248,81,73,.1); }
+  .ll.lWARN { background-color:rgba(210,153,34,.06); }
+  .ll.lTRACE { opacity:.45; } .ll.lTRACE:hover { opacity:.8; }
+  .ll.h5 { background-color:rgba(248,81,73,.1); border-bottom-color:rgba(248,81,73,.2); }
+  .ll.h4 { background-color:rgba(210,153,34,.06); }
+  .ll.fl { background-color:rgba(248,81,73,.08); border-left:3px solid var(--error); }
+  .ll.lplain { border-left:3px solid var(--warn); background-color:rgba(210,153,34,.04); }
+  .ll.lmulti { border-top:none; border-left-color:var(--border); background-color:rgba(210,153,34,.02); }
+  .ll.lmulti .lp { color:var(--border); font-size:14px; }
+  .ll.lscript-err { border-left:3px solid var(--error); background-color:rgba(248,81,73,.08); }
+  .ll.lerror-detail { border-left:3px solid var(--error); background-color:rgba(248,81,73,.12); font-weight:600; }
+  .ll.hl { background-color:rgba(88,166,255,.15); border-left:3px solid var(--accent); }
+  .lh { opacity:0; color:var(--muted); cursor:pointer; padding:0 6px; flex-shrink:0; font-size:14px; transition:opacity .15s; }
+  .ll:hover .lh { opacity:.4; } .lh:hover { opacity:1!important; color:var(--error); }
+
+  /* Hidden patterns panel */
+  .hidden-panel { position:fixed; z-index:200; background:var(--bg2); border:1px solid var(--border); border-radius:8px; min-width:300px; max-width:500px; max-height:400px; box-shadow:0 4px 16px rgba(0,0,0,.5); font-size:12px; display:flex; flex-direction:column; }
+  .hp-header { padding:10px 14px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; font-weight:600; color:var(--bright); }
+  .hp-clear { font-weight:400; color:var(--error); cursor:pointer; font-size:11px; } .hp-clear:hover { text-decoration:underline; }
+  .hp-list { overflow-y:auto; max-height:320px; }
+  .hp-item { display:flex; align-items:center; padding:6px 14px; border-bottom:1px solid var(--border); gap:8px; }
+  .hp-item:hover { background:rgba(255,255,255,.03); }
+  .hp-pattern { flex:1; color:var(--text); word-break:break-all; min-width:0; }
+  .hp-remove { color:var(--muted); cursor:pointer; font-size:16px; padding:0 4px; flex-shrink:0; } .hp-remove:hover { color:var(--error); }
+  .hp-empty { padding:16px; color:var(--muted); text-align:center; }
+
+  .ln { color:var(--trace); min-width:48px; text-align:right; padding-right:10px; user-select:none; flex-shrink:0; cursor:pointer; }
+  .ln:hover { color:var(--accent); text-decoration:underline; }
+  .lt { color:var(--muted); min-width:95px; flex-shrink:0; padding-right:6px; }
+  .lv { min-width:50px; flex-shrink:0; padding-right:6px; font-weight:600; }
+  .lv.ERROR,.lv.FATAL { color:var(--error); } .lv.WARN { color:var(--warn); } .lv.INFO { color:var(--info); }
+  .lv.DEBUG { color:var(--debug); } .lv.TRACE { color:var(--trace); } .lv.HTTP { color:var(--muted); }
+  .lp { color:var(--muted); min-width:110px; max-width:200px; overflow:hidden; text-overflow:ellipsis; flex-shrink:0; padding-right:6px; cursor:pointer; }
+  .lp:hover { color:var(--accent); }
+  .lr { color:var(--accent); opacity:.65; cursor:pointer; flex-shrink:0; padding-right:6px; min-width:72px; font-size:11px; }
+  .lr:hover { opacity:1; text-decoration:underline; }
+  .lm { flex:1; min-width:0; }
+  .lm .hi { background:rgba(210,153,34,.4); color:var(--bright); border-radius:2px; padding:0 2px; }
+  .lm .hi0 { background:rgba(230,219,116,.35); color:#e6db74; } .lm .hi1 { background:rgba(166,226,46,.25); color:#a6e22e; }
+  .lm .hi2 { background:rgba(102,217,239,.25); color:#66d9ef; } .lm .hi3 { background:rgba(253,151,31,.3); color:#fd971f; }
+  .lm .hi4 { background:rgba(174,129,255,.3); color:#ae81ff; } .lm .hi5 { background:rgba(249,38,114,.25); color:#f92672; }
+  .lm .hi6 { background:rgba(230,219,116,.35); color:#e6db74; } .lm .hi7 { background:rgba(161,239,228,.25); color:#a1efe4; }
+  .hi-add { display:flex; gap:6px; padding:8px 14px; border-bottom:1px solid var(--border); }
+  .hi-add input { flex:1; background:var(--bg); border:1px solid var(--border); color:var(--text); font-family:inherit; font-size:12px; padding:5px 8px; border-radius:4px; outline:none; }
+  .hi-add input:focus { border-color:var(--accent); }
+  .hi-swatch { width:12px; height:12px; border-radius:2px; flex-shrink:0; }
+  .hs { font-weight:700; padding:0 3px; border-radius:3px; }
+  .hs.s5 { color:var(--error); background:rgba(248,81,73,.15); }
+  .hs.s4 { color:var(--warn); background:rgba(210,153,34,.15); }
+  .hs.s3 { color:var(--accent); } .hs.s2 { color:var(--success); }
+
+  .je { cursor:pointer; color:var(--accent); opacity:.5; margin-left:4px; font-size:10px; } .je:hover { opacity:1; }
+  .jd { display:none; padding:6px 20px 6px 95px; background:var(--bg2); border-bottom:1px solid var(--border); font-size:11px; white-space:pre-wrap; word-break:break-all; color:var(--muted); }
+  .jd.v { display:block; }
+  .jd .jk { color:var(--accent); } .jd .js { color:var(--success); } .jd .jn { color:var(--warn); } .jd .jb { color:#d2a8ff; } .jd .jl { color:var(--error); }
+
+  .toast { position:fixed; bottom:16px; right:16px; background:var(--bg3); border:1px solid var(--border); padding:8px 14px; border-radius:6px; font-size:12px; z-index:999; opacity:0; transform:translateY(8px); transition:all .25s; pointer-events:none; }
+  .toast.v { opacity:1; transform:translateY(0); }
+
+  /* ── Trace panel ── */
+  .trace-panel { position:fixed; right:0; top:0; width:480px; height:100vh; background:var(--bg2); border-left:2px solid var(--accent); z-index:100; display:none; flex-direction:column; box-shadow:-4px 0 20px rgba(0,0,0,.5); }
+  .trace-panel.v { display:flex; }
+  .tp-header { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+  .tp-title { font-size:13px; font-weight:600; color:var(--bright); }
+  .tp-body { flex:1; overflow-y:auto; padding:12px 0; }
+
+  .tp-section { padding:0 16px 12px; border-bottom:1px solid var(--border); margin-bottom:10px; }
+  .tp-section-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; }
+
+  .tp-flow-name { font-size:14px; font-weight:700; color:var(--bright); margin-bottom:8px; }
+  .tp-flow-name .tp-exec-id { font-size:10px; font-weight:400; color:var(--muted); margin-left:6px; }
+
+  .tp-path { display:flex; flex-wrap:wrap; align-items:center; gap:2px; margin-bottom:4px; }
+  .tp-node { padding:3px 8px; border-radius:4px; font-size:11px; border:1px solid var(--border); background:var(--bg); cursor:pointer; white-space:nowrap; }
+  .tp-node:hover { border-color:var(--accent); }
+  .tp-node.done,.tp-node.post { border-color:var(--success); color:var(--success); }
+  .tp-node.process { border-color:var(--accent); color:var(--accent); }
+  .tp-node.pre { border-color:var(--warn); color:var(--warn); }
+  .tp-node.failed { border-color:var(--error); color:var(--error); background:rgba(248,81,73,.1); }
+  .tp-node.active { background:rgba(88,166,255,.15); }
+  .tp-arrow { color:var(--muted); font-size:11px; }
+
+  .tp-http { padding:6px 10px; border-radius:4px; font-size:11px; margin-top:6px; border:1px solid var(--border); background:var(--bg); }
+  .tp-http.err { border-color:var(--error); background:rgba(248,81,73,.08); }
+  .tp-http .tp-method { font-weight:600; }
+  .tp-http .tp-status { font-weight:700; padding:0 4px; border-radius:3px; }
+  .tp-http .tp-status.s5 { color:var(--error); }
+  .tp-http .tp-status.s4 { color:var(--warn); }
+  .tp-http .tp-status.s2 { color:var(--success); }
+
+  .tp-line { padding:3px 16px; font-size:11px; line-height:1.5; cursor:pointer; display:flex; gap:6px; }
+  .tp-line:hover { background:rgba(255,255,255,.03); }
+  .tp-line.err { background:rgba(248,81,73,.06); }
+  .tp-line .tp-ts { color:var(--muted); min-width:85px; flex-shrink:0; }
+  .tp-line .tp-lv { min-width:42px; flex-shrink:0; font-weight:600; }
+  .tp-line .tp-lv.ERROR { color:var(--error); } .tp-line .tp-lv.WARN { color:var(--warn); } .tp-line .tp-lv.DEBUG { color:var(--debug); } .tp-line .tp-lv.INFO { color:var(--info); } .tp-line .tp-lv.TRACE { color:var(--trace); }
+  .tp-line .tp-msg { flex:1; min-width:0; word-break:break-all; }
+  .tp-line .tp-flow-tag { font-size:9px; color:var(--accent); background:rgba(88,166,255,.1); padding:1px 5px; border-radius:3px; flex-shrink:0; }
+
+  .tp-errors { background:rgba(248,81,73,.06); }
+  .tp-failure { padding:6px 0; font-size:12px; color:var(--error); cursor:pointer; display:flex; align-items:baseline; gap:6px; }
+  .tp-failure:hover { text-decoration:underline; }
+  .tp-fail-icon { flex-shrink:0; }
+  .tp-fail-id { color:var(--muted); font-size:10px; }
+  .tp-error-detail { padding:4px 0; font-size:11px; color:var(--error); opacity:.85; cursor:pointer; }
+  .tp-error-detail:hover { opacity:1; }
+  .tp-inline-fail { padding:4px 0 4px 12px; font-size:11px; color:var(--error); border-left:2px solid var(--error); margin:4px 0; cursor:pointer; }
+  .tp-inline-fail:hover { background:rgba(248,81,73,.08); }
+  .tp-next-id { font-size:9px; color:var(--muted); opacity:.6; }
+  .tp-flow-tag.fail { background:rgba(248,81,73,.15); color:var(--error); }
+  .tp-empty { color:var(--muted); font-size:12px; text-align:center; padding:20px; }
+
+  /* ── JSON Inspector ── */
+  .jin { cursor:pointer; color:var(--accent); opacity:.55; margin-left:6px; font-size:10px; font-family:inherit; padding:0 4px; border-radius:3px; border:1px solid var(--border); background:var(--bg); }
+  .jin:hover { opacity:1; background:var(--bg3); border-color:var(--accent); }
+  .inspect-panel { position:fixed; left:0; top:0; width:540px; height:100vh; background:var(--bg2); border-right:2px solid var(--accent); z-index:100; display:none; flex-direction:column; box-shadow:4px 0 20px rgba(0,0,0,.5); }
+  .inspect-panel.v { display:flex; }
+  .ip-header { padding:10px 14px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; flex-shrink:0; gap:6px; }
+  .ip-title { font-size:13px; font-weight:600; color:var(--bright); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ip-actions { display:flex; gap:4px; flex-shrink:0; }
+  .ip-actions .btn { padding:3px 8px; font-size:11px; }
+  .ip-body { flex:1; overflow:auto; padding:12px 14px; font-size:12px; line-height:1.55; font-family:'SF Mono','Cascadia Code','Fira Code','JetBrains Mono','Consolas',monospace; }
+
+  .jv-row { white-space:pre-wrap; word-break:break-word; }
+  .jv-body { border-left:1px dashed var(--border); margin-left:5px; padding-left:11px; }
+  .jv-body.jv-collapsed { display:none; }
+  .jv-close.jv-collapsed { display:none; }
+  .jv-tog { display:inline-block; width:12px; text-align:center; cursor:pointer; color:var(--muted); user-select:none; margin-right:3px; font-size:9px; }
+  .jv-tog:hover { color:var(--accent); }
+  .jv-k { color:var(--accent); }
+  .jv-str { color:var(--success); }
+  .jv-num { color:var(--warn); }
+  .jv-bool { color:#d2a8ff; }
+  .jv-null { color:var(--error); }
+  .jv-br { color:var(--muted); }
+  .jv-count { color:var(--trace); font-size:10px; margin-left:6px; }
+  .jv-hint { color:var(--trace); font-size:10px; font-style:italic; margin:0 4px; }
+  .jv-more { color:var(--accent); cursor:pointer; font-size:10px; opacity:.7; margin-left:4px; }
+  .jv-more:hover { opacity:1; text-decoration:underline; }
+  .jv-hide { display:none; }
+  .jv-preview { color:var(--muted); font-size:10px; margin-left:6px; font-style:italic; }
+  .jv-body.jv-collapsed + .jv-close { display:none; }
+  .jv-row:hover { background:rgba(255,255,255,.02); }
+
+  ::-webkit-scrollbar { width:7px; } ::-webkit-scrollbar-track { background:var(--bg); } ::-webkit-scrollbar-thumb { background:var(--bg3); border-radius:4px; } ::-webkit-scrollbar-thumb:hover { background:var(--border); }
+  @media(max-width:800px) { .lp,.lr { display:none; } }
 </style>
 </head>
 <body>
 
-<!-- Top Bar -->
-<div class="top-bar">
-  <h1>IO Log Viewer</h1>
-  <div class="auth-status" id="authStatus">
-    <span class="connection-dot" id="connDot"></span>
-    <span id="authLabel">Connecting...</span>
-  </div>
+<!-- Top bar -->
+<div class="bar">
+  <span class="dot" id="cDot"></span>
+  <h1>Kube Logger</h1>
+  <span class="status-text" id="cLabel">Connecting...</span>
+  <button class="btn" id="clearBtn" style="display:none">Clear</button>
+  <span id="buildTag" style="font-size:9px;color:var(--muted);opacity:0.6;letter-spacing:0.5px">build:saas-v1</span>
+  <div class="ns-legend" id="nsLegend"></div>
   <div class="stats" id="stats"></div>
 </div>
 
-<!-- Control Bar -->
-<div class="control-bar">
-  <select id="profileSelect">
-    <option value="">Select AWS Profile...</option>
-    <option value="example-profile-a">example-l (Lab)</option>
-    <option value="example-profile-b">example-p (Prod)</option>
-  </select>
-
-  <button class="btn" id="authBtn" title="Check auth / Login">Check Auth</button>
-
-  <div class="separator"></div>
-
-  <select id="nsSelect" disabled>
-    <option value="">Select Namespace...</option>
-  </select>
-
-  <button class="btn" id="loadNsBtn" disabled title="Load available namespaces">Load NS</button>
-
-  <div class="separator"></div>
-
-  <button class="btn primary" id="startBtn" disabled>Start Capture</button>
-  <button class="btn danger" id="stopBtn" disabled style="display:none">Stop Capture</button>
-
-  <div class="separator"></div>
-
-  <input type="file" id="fileInput" accept=".txt,.log,.json" style="display:none" />
-  <button class="btn" id="openFileBtn" title="Open a log file instead">Open File</button>
-</div>
-
-<!-- Filter Bar (appears after logs are loaded) -->
-<div class="filter-bar" id="filterBar">
+<!-- Filter bar -->
+<div class="bar" id="filterBar" style="display:none">
+  <select id="presetSelect" title="Active filter preset"><option value="">— Preset —</option></select>
+  <button class="btn" id="presetSave" title="Save current filters as a named preset">Save as…</button>
+  <button class="btn" id="presetDel" title="Delete the selected preset" disabled>×</button>
+  <div class="sep"></div>
   <div class="search-box">
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Zm-.82 4.74a6 6 0 1 1 1.06-1.06l3.04 3.04a.75.75 0 1 1-1.06 1.06l-3.04-3.04Z"/></svg>
-    <input type="text" id="searchInput" placeholder="Search logs... (regex supported)" />
-    <span class="search-count" id="searchCount"></span>
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Zm-.82 4.74a6 6 0 1 1 1.06-1.06l3.04 3.04a.75.75 0 1 1-1.06 1.06l-3.04-3.04Z"/></svg>
+    <input type="text" id="searchInput" placeholder="Search (regex)" />
+    <span class="sc" id="searchCount"></span>
   </div>
-
-  <select id="levelFilter">
-    <option value="all">All Levels</option>
-    <option value="ERROR">ERROR</option>
-    <option value="WARN">WARN</option>
-    <option value="INFO">INFO</option>
-    <option value="DEBUG">DEBUG</option>
-    <option value="TRACE">TRACE</option>
-    <option value="HTTP">HTTP (nginx)</option>
-  </select>
-
-  <select id="podFilter">
-    <option value="all">All Services</option>
-  </select>
-
-  <select id="reqidFilter">
-    <option value="all">All Request IDs</option>
-  </select>
-
-  <div class="separator"></div>
-
-  <button class="btn" id="hideTraceBtn">Hide TRACE</button>
-  <button class="btn error-jump" id="prevError">&#9650; Err</button>
-  <button class="btn error-jump" id="nextError">&#9660; Err</button>
-
-  <div class="separator"></div>
-
-  <button class="btn" id="autoScrollBtn" title="Auto-scroll to bottom on new logs">Auto-scroll: ON</button>
+  <select id="levelFilter"><option value="all">All Levels</option><option value="ERROR">ERROR</option><option value="WARN">WARN</option><option value="INFO">INFO</option><option value="DEBUG">DEBUG</option><option value="TRACE">TRACE</option><option value="HTTP">HTTP</option></select>
+  <select id="podFilter"><option value="all">All Services</option></select>
+  <select id="reqidFilter"><option value="all">All Requests</option></select>
+  <div class="sep"></div>
+  <button class="btn" id="highlightBtn">Highlights</button>
+  <button class="btn" id="hiddenBtn">Hidden</button>
+  <button class="btn" id="hideTrace">Hide TRACE</button>
+  <button class="btn ej" id="prevErr">&#9650; Err</button>
+  <button class="btn ej" id="nextErr">&#9660; Err</button>
+  <div class="sep"></div>
+  <button class="btn" id="autoScroll">Auto-scroll: ON</button>
   <button class="btn" id="resetBtn">Reset</button>
   <button class="btn" id="exportBtn">Export</button>
-  <button class="btn" id="saveBtn">Save to ~/Downloads</button>
+  <input type="file" id="fileInput" accept=".txt,.log" style="display:none" />
+  <button class="btn" id="openFile">Open File</button>
 </div>
 
-<!-- Recording Banner -->
-<div class="recording-banner" id="recordingBanner">
-  <span class="rec-dot"></span>
-  <span id="recInfo">Capturing...</span>
-</div>
+<div class="rec-banner" id="recBanner"><span class="rec-dot"></span><span id="recInfo"></span></div>
+<div class="err-banner" id="errBanner"></div>
+<div class="ftl" id="ftl"><div class="ftl-label">Flow Node Execution</div><div class="fnodes" id="fnodes"></div></div>
 
-<!-- Error Banner -->
-<div class="error-banner" id="errorBanner"></div>
-
-<!-- Flow Timeline -->
-<div class="flow-timeline" id="flowTimeline">
-  <div class="flow-timeline-label">Flow Node Execution</div>
-  <div class="flow-nodes" id="flowNodes"></div>
-</div>
-
-<!-- Welcome Screen -->
+<!-- Welcome -->
 <div class="welcome" id="welcome">
-  <h2>Ready to capture logs</h2>
-  <div class="step-list">
-    <div><span class="step-num">1</span> Select your AWS profile and authenticate</div>
-    <div><span class="step-num">2</span> Pick a namespace</div>
-    <div><span class="step-num">3</span> Hit <strong>Start Capture</strong>, do your thing, hit <strong>Stop</strong></div>
-    <div><span class="step-num">4</span> Search, filter, and trace through the logs</div>
-  </div>
-  <p style="margin-top: 16px; color: var(--text-muted);">Or drop/open an existing log file below</p>
-  <div class="drop-zone-mini" id="dropZone">
-    Drop log file here or click to browse
-  </div>
+  <h2>Waiting for logs</h2>
+  <p>Start a capture from the extension popup, or drop a log file below.</p>
+  <div class="dz" id="dz">Drop log file here</div>
 </div>
 
-<!-- Log Container -->
-<div class="log-container" id="logContainer"></div>
-
-<!-- Toast -->
+<!-- Logs -->
+<div class="lc" id="lc"></div>
 <div class="toast" id="toast"></div>
 
-<script>
-// ---- State ----
-const state = {
-  ws: null,
-  connected: false,
-  authenticated: false,
-  capturing: false,
-  lines: [],         // parsed log lines
-  rawLines: [],
-  filtered: [],
-  errorIndices: [],
-  currentError: -1,
-  pods: new Set(),
-  reqIds: new Map(),
-  flowNodes: [],
-  searchTerm: '',
-  hideTrace: false,
-  levelFilter: 'all',
-  podFilter: 'all',
-  reqidFilter: 'all',
-  autoScroll: true,
-  mode: 'idle',       // idle, live, file
-  captureStart: null,
-  liveLineBuffer: [],  // buffer for batch rendering
-  renderScheduled: false,
-};
-
-// ---- Parsing ----
-const NGINX_RE = /^(\S+)\s+(\S+)\s+(\S+)\s+-\s+-\s+\[([^\]]+)\]\s+"(\w+)\s+(\S+)\s+\S+"\s+(\d+)\s+(\d+)\s+"([^"]*)"\s+"([^"]*)"/;
-const STERN_JSON_RE = /^(\S+)\s+(\S+)\s+(\{.+\})$/;
-const STERN_PREFIX_RE = /^([+-])\s+(\S+)\s+.\s+(\S+)$/;
-
-function parseLine(raw, idx) {
-  const trimmed = raw.trimEnd();
-  if (!trimmed) return null;
-
-  const sternMatch = trimmed.match(STERN_PREFIX_RE);
-  if (sternMatch) {
-    return { type: 'stern', action: sternMatch[1], pod: sternMatch[2], container: sternMatch[3], idx, raw: trimmed };
-  }
-
-  const nginxMatch = trimmed.match(NGINX_RE);
-  if (nginxMatch) {
-    const status = parseInt(nginxMatch[7]);
-    return { type: 'http', pod: nginxMatch[1], container: nginxMatch[2], ip: nginxMatch[3], timestamp: nginxMatch[4], method: nginxMatch[5], path: nginxMatch[6], status, size: parseInt(nginxMatch[8]), level: 'HTTP', idx, raw: trimmed };
-  }
-
-  const jsonMatch = trimmed.match(STERN_JSON_RE);
-  if (jsonMatch) {
-    try {
-      const json = JSON.parse(jsonMatch[3]);
-      const dataArr = json.data || [];
-      let msg = '';
-      let fileInfo = null;
-      for (const item of dataArr) {
-        if (typeof item === 'string') msg += (msg ? ' ' : '') + item;
-        else if (item && item.file) fileInfo = item;
-        else if (item && typeof item === 'object') msg += (msg ? ' ' : '') + JSON.stringify(item);
-      }
-      return { type: 'json', pod: jsonMatch[1], container: jsonMatch[2], timestamp: json.timestamp, level: (json.level || 'INFO').toUpperCase(), category: json.category, reqId: json.req_id, domainId: json.domain_id, msg, fileInfo, data: json.data, json, idx, raw: trimmed };
-    } catch {}
-  }
-
-  const twoPartMatch = trimmed.match(/^(\S+)\s+(\S+)\s+(.+)$/);
-  if (twoPartMatch && twoPartMatch[1].startsWith('io-')) {
-    return { type: 'plain', pod: twoPartMatch[1], container: twoPartMatch[2], msg: twoPartMatch[3], level: twoPartMatch[3].toLowerCase().includes('error') ? 'ERROR' : twoPartMatch[3].toLowerCase().includes('warn') ? 'WARN' : 'INFO', idx, raw: trimmed };
-  }
-
-  return { type: 'raw', msg: trimmed, level: 'INFO', idx, raw: trimmed };
-}
-
-function extractFlowNodes(lines) {
-  const nodes = [];
-  const seen = new Set();
-  const nodeRe = /\[([^\]]+)\]\s+(\S+)\s+-\s+Node\s+(\S+)\s+is\s+in\s+(\w+)\s+state(?:,\s+next\s+node\s+is\s+(\S+))?/;
-  const failRe = /Failure from node\s+(\S+)\s+\(([^)]+)\)/;
-
-  for (const line of lines) {
-    if (line.type !== 'json') continue;
-    const m = (line.msg || '').match(nodeRe);
-    if (m) {
-      const key = m[3] + '-' + m[4];
-      if (!seen.has(key)) { seen.add(key); nodes.push({ flowId: m[1], flowType: m[2], node: m[3], state: m[4], next: m[5], lineIdx: line.idx }); }
-    }
-    const fm = (line.msg || '').match(failRe);
-    if (fm) {
-      const key = fm[1] + '-failed';
-      if (!seen.has(key)) { seen.add(key); nodes.push({ node: fm[1], label: fm[2], state: 'failed', lineIdx: line.idx }); }
-    }
-  }
-  return nodes;
-}
-
-// ---- Rendering ----
-function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-function highlightSearch(text, term) {
-  if (!term) return escapeHtml(text);
-  try {
-    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return escapeHtml(text).replace(new RegExp('(' + escaped + ')', 'gi'), '<span class="highlight-text">$1</span>');
-  } catch { return escapeHtml(text); }
-}
-
-function shortPod(pod) {
-  if (!pod) return '';
-  const m = pod.match(/^io-(.+?)(?:-[a-f0-9]{6,})+/);
-  return m ? m[1] : (pod.length > 24 ? pod.slice(0, 22) + '..' : pod);
-}
-
-function shortReqId(reqId) { return reqId ? reqId.slice(0, 8) : ''; }
-
-function formatTimestamp(ts) {
-  if (!ts) return '';
-  try { return new Date(ts).toISOString().slice(11, 23); } catch { return ts.slice(0, 12); }
-}
-
-function buildLineHtml(line, searchTerm) {
-  if (line.type === 'stern') return '';
-
-  let cls = 'log-line';
-  if (line.level) cls += ' level-' + line.level;
-  if (line.type === 'http' && line.status >= 500) cls += ' http-500';
-  else if (line.type === 'http' && line.status >= 400) cls += ' http-400';
-  if (line.msg && /failure|fail|error/i.test(line.msg) && line.level !== 'TRACE') cls += ' failure-line';
-
-  let html = `<div class="${cls}" data-idx="${line.idx}">`;
-  html += `<span class="line-no">${line.idx + 1}</span>`;
-  html += `<span class="line-ts">${line.timestamp ? formatTimestamp(line.timestamp) : ''}</span>`;
-  html += `<span class="line-level ${line.level || ''}">${line.level || ''}</span>`;
-  html += `<span class="line-pod" title="${escapeHtml(line.pod || '')}" data-pod="${escapeHtml(line.pod || '')}">${escapeHtml(shortPod(line.pod))}</span>`;
-  html += `<span class="line-reqid" title="${escapeHtml(line.reqId || '')}" data-reqid="${escapeHtml(line.reqId || '')}">${line.reqId ? shortReqId(line.reqId) : ''}</span>`;
-
-  if (line.type === 'http') {
-    const sc = line.status >= 500 ? 's5xx' : line.status >= 400 ? 's4xx' : line.status >= 300 ? 's3xx' : 's2xx';
-    html += `<span class="line-msg">${highlightSearch(line.method + ' ' + line.path + ' ', searchTerm)}<span class="line-http-status ${sc}">${line.status}</span> ${line.size}B</span>`;
-  } else {
-    const msgText = line.msg || line.raw || '';
-    const display = msgText.length > 500 ? msgText.slice(0, 500) + '...' : msgText;
-    html += `<span class="line-msg">${highlightSearch(display, searchTerm)}`;
-    if (line.type === 'json' && line.data) html += `<span class="json-expand" data-line-idx="${line.idx}">[+]</span>`;
-    html += `</span>`;
-  }
-
-  html += '</div>';
-  return html;
-}
-
-function renderJsonDetail(line) {
-  function syntaxHighlight(json) {
-    return JSON.stringify(json, null, 2).replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, (match) => {
-      let cls = 'json-num';
-      if (/^"/.test(match)) cls = /:$/.test(match) ? 'json-key' : 'json-str';
-      else if (/true|false/.test(match)) cls = 'json-bool';
-      else if (/null/.test(match)) cls = 'json-null';
-      return `<span class="${cls}">${match}</span>`;
-    });
-  }
-  return `<div class="json-detail" id="json-detail-${line.idx}">${syntaxHighlight(line.json || line.data)}</div>`;
-}
-
-// ---- Filtering ----
-function shouldShow(line) {
-  if (!line || line.type === 'stern') return false;
-  if (state.levelFilter !== 'all' && line.level !== state.levelFilter) return false;
-  if (state.hideTrace && line.level === 'TRACE') return false;
-  if (state.podFilter !== 'all' && line.pod !== state.podFilter) return false;
-  if (state.reqidFilter !== 'all' && line.reqId !== state.reqidFilter) return false;
-  if (state.searchTerm) {
-    try {
-      const re = new RegExp(state.searchTerm, 'i');
-      if (!re.test(line.raw || line.msg || '')) return false;
-    } catch {
-      if (!(line.raw || line.msg || '').toLowerCase().includes(state.searchTerm.toLowerCase())) return false;
-    }
-  }
-  return true;
-}
-
-function applyFilters() {
-  state.filtered = [];
-  state.errorIndices = [];
-  for (let i = 0; i < state.lines.length; i++) {
-    const line = state.lines[i];
-    if (!shouldShow(line)) continue;
-    state.filtered.push(i);
-    if (line.level === 'ERROR' || line.level === 'FATAL' ||
-        (line.type === 'http' && line.status >= 500) ||
-        (line.msg && /failure|fail/i.test(line.msg) && line.level !== 'TRACE')) {
-      state.errorIndices.push(i);
-    }
-  }
-  state.currentError = -1;
-}
-
-function fullRender() {
-  const container = document.getElementById('logContainer');
-  let html = '';
-  for (const idx of state.filtered) {
-    html += buildLineHtml(state.lines[idx], state.searchTerm);
-  }
-  container.innerHTML = html;
-
-  container.classList.add('visible');
-  document.getElementById('welcome').classList.add('hidden');
-  document.getElementById('filterBar').classList.add('visible');
-
-  updateStats();
-  updateFlowTimeline();
-  updateErrorBanner();
-}
-
-function appendLine(line) {
-  if (!shouldShow(line)) return;
-
-  state.filtered.push(line.idx);
-
-  if (line.level === 'ERROR' || line.level === 'FATAL' ||
-      (line.type === 'http' && line.status >= 500) ||
-      (line.msg && /failure|fail/i.test(line.msg) && line.level !== 'TRACE')) {
-    state.errorIndices.push(line.idx);
-  }
-
-  // Buffer for batch rendering (avoid hammering the DOM on fast streams)
-  state.liveLineBuffer.push(line);
-  if (!state.renderScheduled) {
-    state.renderScheduled = true;
-    requestAnimationFrame(flushLineBuffer);
-  }
-}
-
-function flushLineBuffer() {
-  state.renderScheduled = false;
-  if (state.liveLineBuffer.length === 0) return;
-
-  const container = document.getElementById('logContainer');
-  let html = '';
-  for (const line of state.liveLineBuffer) {
-    html += buildLineHtml(line, state.searchTerm);
-  }
-  container.insertAdjacentHTML('beforeend', html);
-  state.liveLineBuffer = [];
-
-  if (state.autoScroll) {
-    container.scrollTop = container.scrollHeight;
-  }
-
-  updateStats();
-  // Update flow timeline less frequently
-  if (state.filtered.length % 50 === 0) {
-    state.flowNodes = extractFlowNodes(state.lines.filter(Boolean));
-    updateFlowTimeline();
-  }
-  updateErrorBanner();
-}
-
-function updateStats() {
-  const counts = { total: state.filtered.length, ERROR: 0, WARN: 0, INFO: 0, DEBUG: 0, TRACE: 0, HTTP: 0 };
-  for (const idx of state.filtered) {
-    const l = state.lines[idx];
-    if (l && counts[l.level] !== undefined) counts[l.level]++;
-    if (l && l.type === 'http') counts.HTTP++;
-  }
-
-  document.getElementById('stats').innerHTML = `
-    <span class="stat"><span class="dot total"></span>${counts.total}</span>
-    ${counts.ERROR ? `<span class="stat"><span class="dot error"></span>${counts.ERROR} err</span>` : ''}
-    ${counts.WARN ? `<span class="stat"><span class="dot warn"></span>${counts.WARN} warn</span>` : ''}
-    <span class="stat"><span class="dot debug"></span>${counts.DEBUG} dbg</span>
-    <span class="stat"><span class="dot trace"></span>${counts.TRACE} trc</span>
-    ${counts.HTTP ? `<span class="stat"><span class="dot http"></span>${counts.HTTP} http</span>` : ''}
-  `;
-
-  document.getElementById('searchCount').textContent = state.searchTerm ? `${state.filtered.length} matches` : '';
-}
-
-function updateErrorBanner() {
-  const banner = document.getElementById('errorBanner');
-  if (state.errorIndices.length > 0) {
-    const summaries = [];
-    for (const idx of state.errorIndices.slice(0, 3)) {
-      const l = state.lines[idx];
-      if (l.type === 'http') summaries.push(`${l.method} ${l.path} -> ${l.status}`);
-      else if (l.msg) summaries.push(l.msg.slice(0, 80));
-    }
-    banner.textContent = `${state.errorIndices.length} issue(s): ${summaries.join(' | ')}`;
-    banner.classList.add('visible');
-  } else {
-    banner.classList.remove('visible');
-  }
-}
-
-function updateFlowTimeline() {
-  state.flowNodes = extractFlowNodes(state.lines.filter(Boolean));
-  const container = document.getElementById('flowNodes');
-  const wrapper = document.getElementById('flowTimeline');
-  container.innerHTML = '';
-  if (state.flowNodes.length === 0) { wrapper.classList.remove('visible'); return; }
-  wrapper.classList.add('visible');
-
-  state.flowNodes.forEach((node, i) => {
-    if (i > 0) container.insertAdjacentHTML('beforeend', '<span class="flow-arrow">-></span>');
-    const el = document.createElement('span');
-    el.className = `flow-node ${node.state}`;
-    el.textContent = node.label || node.node;
-    el.title = `Node: ${node.node}, State: ${node.state}`;
-    el.addEventListener('click', () => scrollToLine(node.lineIdx));
-    container.appendChild(el);
-  });
-}
-
-function populateFilters() {
-  const podSelect = document.getElementById('podFilter');
-  const reqSelect = document.getElementById('reqidFilter');
-  podSelect.innerHTML = '<option value="all">All Services</option>';
-  for (const pod of [...state.pods].sort()) {
-    const opt = document.createElement('option');
-    opt.value = pod;
-    opt.textContent = shortPod(pod);
-    podSelect.appendChild(opt);
-  }
-  reqSelect.innerHTML = '<option value="all">All Request IDs</option>';
-  for (const [id, count] of [...state.reqIds.entries()].sort((a, b) => b[1] - a[1])) {
-    const opt = document.createElement('option');
-    opt.value = id;
-    opt.textContent = `${shortReqId(id)} (${count})`;
-    reqSelect.appendChild(opt);
-  }
-}
-
-// ---- Navigation ----
-function scrollToLine(idx) {
-  const container = document.getElementById('logContainer');
-  const el = container.querySelector(`[data-idx="${idx}"]`);
-  if (el) {
-    container.querySelectorAll('.highlight').forEach(e => e.classList.remove('highlight'));
-    el.classList.add('highlight');
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }
-}
-
-function jumpToError(dir) {
-  if (state.errorIndices.length === 0) { toast('No errors found'); return; }
-  state.currentError = dir === 'next'
-    ? (state.currentError + 1) % state.errorIndices.length
-    : (state.currentError <= 0 ? state.errorIndices.length - 1 : state.currentError - 1);
-  scrollToLine(state.errorIndices[state.currentError]);
-  toast(`Error ${state.currentError + 1}/${state.errorIndices.length}`);
-}
-
-function toast(msg) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.classList.add('visible');
-  clearTimeout(el._t);
-  el._t = setTimeout(() => el.classList.remove('visible'), 2500);
-}
-
-// ---- File Loading ----
-function loadFromFile(text) {
-  state.mode = 'file';
-  state.lines = [];
-  state.rawLines = text.split('\n');
-  state.pods = new Set();
-  state.reqIds = new Map();
-
-  for (let i = 0; i < state.rawLines.length; i++) {
-    const parsed = parseLine(state.rawLines[i], i);
-    state.lines.push(parsed);
-    if (parsed) {
-      if (parsed.pod) state.pods.add(parsed.pod);
-      if (parsed.reqId) state.reqIds.set(parsed.reqId, (state.reqIds.get(parsed.reqId) || 0) + 1);
-    }
-  }
-
-  populateFilters();
-  applyFilters();
-  fullRender();
-
-  if (state.errorIndices.length > 0) {
-    setTimeout(() => { state.currentError = 0; scrollToLine(state.errorIndices[0]); }, 300);
-  }
-  toast(`Loaded ${state.rawLines.length} lines from file`);
-}
-
-// ---- Live: add a raw line from WebSocket ----
-function addLiveLine(rawLine) {
-  const idx = state.lines.length;
-  state.rawLines.push(rawLine);
-  const parsed = parseLine(rawLine, idx);
-  state.lines.push(parsed);
-
-  if (parsed) {
-    if (parsed.pod) {
-      const hadPod = state.pods.has(parsed.pod);
-      state.pods.add(parsed.pod);
-      if (!hadPod) populateFilters();
-    }
-    if (parsed.reqId) {
-      state.reqIds.set(parsed.reqId, (state.reqIds.get(parsed.reqId) || 0) + 1);
-      // Update reqid filter periodically
-      if (state.lines.length % 100 === 0) populateFilters();
-    }
-    appendLine(parsed);
-  }
-}
-
-// ---- WebSocket ----
-function connectWs() {
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${protocol}//${location.host}`);
-  state.ws = ws;
-
-  ws.onopen = () => {
-    state.connected = true;
-    updateAuthUI();
-    toast('Connected to server');
-  };
-
-  ws.onclose = () => {
-    state.connected = false;
-    updateAuthUI();
-    // Reconnect after 3s
-    setTimeout(connectWs, 3000);
-  };
-
-  ws.onerror = () => {
-    state.connected = false;
-    updateAuthUI();
-  };
-
-  ws.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data);
-
-    switch (msg.type) {
-      case 'init':
-        if (msg.auth) {
-          state.authenticated = msg.auth.authenticated;
-          updateAuthUI(msg.auth);
-        }
-        break;
-
-      case 'auth-status':
-        state.authenticated = msg.authenticated;
-        updateAuthUI(msg);
-        if (msg.authenticated) {
-          document.getElementById('loadNsBtn').disabled = false;
-          toast('Authenticated');
-        }
-        break;
-
-      case 'auth-progress':
-        document.getElementById('authLabel').textContent = msg.message;
-        break;
-
-      case 'auth-result':
-        toast(msg.message);
-        if (msg.success) document.getElementById('loadNsBtn').disabled = false;
-        break;
-
-      case 'namespaces':
-        populateNamespaces(msg.namespaces);
-        break;
-
-      case 'capture-started':
-        state.capturing = true;
-        state.mode = 'live';
-        state.captureStart = new Date(msg.startTime);
-        state.lines = [];
-        state.rawLines = [];
-        state.filtered = [];
-        state.pods = new Set();
-        state.reqIds = new Map();
-        state.errorIndices = [];
-        document.getElementById('logContainer').innerHTML = '';
-        document.getElementById('logContainer').classList.add('visible');
-        document.getElementById('welcome').classList.add('hidden');
-        document.getElementById('filterBar').classList.add('visible');
-        document.getElementById('startBtn').style.display = 'none';
-        document.getElementById('stopBtn').style.display = '';
-        document.getElementById('stopBtn').disabled = false;
-        showRecordingBanner(true, msg.namespace);
-        toast(`Capturing on ${msg.namespace} (${msg.tool})`);
-        updateCaptureTimer();
-        break;
-
-      case 'log':
-        addLiveLine(msg.line);
-        break;
-
-      case 'stderr':
-        // Show stderr as a toast, not fatal
-        if (!msg.message.includes('ExperimentalWarning')) {
-          toast(msg.message.slice(0, 100));
-        }
-        break;
-
-      case 'capture-stopped':
-      case 'capture-ended':
-        state.capturing = false;
-        document.getElementById('startBtn').style.display = '';
-        document.getElementById('startBtn').disabled = false;
-        document.getElementById('stopBtn').style.display = 'none';
-        showRecordingBanner(false);
-        // Final render with all filters
-        populateFilters();
-        state.flowNodes = extractFlowNodes(state.lines.filter(Boolean));
-        updateFlowTimeline();
-        updateErrorBanner();
-        updateStats();
-        if (msg.lineCount !== undefined) toast(`Captured ${msg.lineCount} lines`);
-        if (state.errorIndices.length > 0) {
-          setTimeout(() => { state.currentError = 0; scrollToLine(state.errorIndices[0]); }, 500);
-        }
-        break;
-
-      case 'saved':
-        toast(`Saved to ${msg.filename}`);
-        break;
-
-      case 'error':
-        toast(`Error: ${msg.message}`);
-        break;
-    }
-  };
-}
-
-function send(msg) {
-  if (state.ws && state.ws.readyState === 1) {
-    state.ws.send(JSON.stringify(msg));
-  }
-}
-
-// ---- UI Updates ----
-function updateAuthUI(auth) {
-  const dot = document.getElementById('connDot');
-  const label = document.getElementById('authLabel');
-  dot.className = 'connection-dot';
-
-  if (!state.connected) {
-    dot.classList.add('auth-fail');
-    label.textContent = 'Disconnected';
-  } else if (auth && auth.authenticated) {
-    dot.classList.add('auth-ok');
-    label.textContent = auth.arn ? `${auth.arn.split('/').pop()}` : 'Authenticated';
-  } else {
-    dot.classList.add('auth-fail');
-    label.textContent = auth && auth.error ? 'Not authenticated' : 'Connected (no auth)';
-  }
-}
-
-function populateNamespaces(namespaces) {
-  const sel = document.getElementById('nsSelect');
-  sel.innerHTML = '<option value="">Select Namespace...</option>';
-  // Put io and productpod ones first
-  const priority = namespaces.filter(n => n.includes('io') || n.includes('productpod'));
-  const rest = namespaces.filter(n => !n.includes('io') && !n.includes('productpod'));
-  for (const ns of [...priority, ...rest]) {
-    const opt = document.createElement('option');
-    opt.value = ns;
-    opt.textContent = ns;
-    sel.appendChild(opt);
-  }
-  sel.disabled = false;
-  toast(`Loaded ${namespaces.length} namespaces`);
-}
-
-function showRecordingBanner(show, namespace) {
-  const banner = document.getElementById('recordingBanner');
-  if (show) {
-    banner.classList.add('visible');
-    document.getElementById('recInfo').textContent = `Capturing ${namespace || ''}...`;
-  } else {
-    banner.classList.remove('visible');
-  }
-}
-
-let timerInterval;
-function updateCaptureTimer() {
-  clearInterval(timerInterval);
-  timerInterval = setInterval(() => {
-    if (!state.capturing || !state.captureStart) { clearInterval(timerInterval); return; }
-    const elapsed = Math.floor((Date.now() - state.captureStart.getTime()) / 1000);
-    const m = Math.floor(elapsed / 60);
-    const s = elapsed % 60;
-    const ns = document.getElementById('nsSelect').value;
-    document.getElementById('recInfo').textContent = `Capturing ${ns} - ${m}:${String(s).padStart(2, '0')} - ${state.lines.length} lines`;
-  }, 1000);
-}
-
-// ---- Auth check loop ----
-let authCheckInterval;
-function startAuthCheckLoop() {
-  clearInterval(authCheckInterval);
-  authCheckInterval = setInterval(() => {
-    const profile = document.getElementById('profileSelect').value;
-    if (profile && state.connected) {
-      send({ action: 'check-auth', profile });
-    }
-  }, 60000); // every 60s
-}
-
-// ---- Event Listeners ----
-
-// Auth
-document.getElementById('authBtn').addEventListener('click', () => {
-  const profile = document.getElementById('profileSelect').value;
-  if (!profile) { toast('Select a profile first'); return; }
-  send({ action: 'check-auth', profile });
-  // If not authenticated, also trigger login
-  setTimeout(() => {
-    if (!state.authenticated) {
-      send({ action: 'login', profile });
-    }
-  }, 2000);
-});
-
-document.getElementById('profileSelect').addEventListener('change', (e) => {
-  if (e.target.value) {
-    send({ action: 'check-auth', profile: e.target.value });
-    startAuthCheckLoop();
-  }
-});
-
-// Namespaces
-document.getElementById('loadNsBtn').addEventListener('click', () => {
-  send({ action: 'get-namespaces' });
-});
-
-document.getElementById('nsSelect').addEventListener('change', (e) => {
-  document.getElementById('startBtn').disabled = !e.target.value;
-});
-
-// Capture
-document.getElementById('startBtn').addEventListener('click', () => {
-  const ns = document.getElementById('nsSelect').value;
-  if (!ns) { toast('Select a namespace'); return; }
-  send({ action: 'start-capture', namespace: ns });
-});
-
-document.getElementById('stopBtn').addEventListener('click', () => {
-  send({ action: 'stop-capture' });
-});
-
-// File open
-document.getElementById('openFileBtn').addEventListener('click', () => document.getElementById('fileInput').click());
-document.getElementById('fileInput').addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (file) { const r = new FileReader(); r.onload = (ev) => loadFromFile(ev.target.result); r.readAsText(file); }
-});
-
-// Drop zone
-const dropZone = document.getElementById('dropZone');
-dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-dropZone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  dropZone.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (file) { const r = new FileReader(); r.onload = (ev) => loadFromFile(ev.target.result); r.readAsText(file); }
-});
-dropZone.addEventListener('click', () => document.getElementById('fileInput').click());
-
-// Also allow drop on the whole page
-document.body.addEventListener('dragover', (e) => e.preventDefault());
-document.body.addEventListener('drop', (e) => {
-  e.preventDefault();
-  const file = e.dataTransfer.files[0];
-  if (file) { const r = new FileReader(); r.onload = (ev) => loadFromFile(ev.target.result); r.readAsText(file); }
-});
-
-// Search
-let searchTimeout;
-document.getElementById('searchInput').addEventListener('input', (e) => {
-  clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(() => {
-    state.searchTerm = e.target.value.trim();
-    applyFilters();
-    fullRender();
-  }, 200);
-});
-
-// Filters
-document.getElementById('levelFilter').addEventListener('change', (e) => { state.levelFilter = e.target.value; applyFilters(); fullRender(); });
-document.getElementById('podFilter').addEventListener('change', (e) => { state.podFilter = e.target.value; applyFilters(); fullRender(); });
-document.getElementById('reqidFilter').addEventListener('change', (e) => { state.reqidFilter = e.target.value; applyFilters(); fullRender(); });
-
-document.getElementById('hideTraceBtn').addEventListener('click', (e) => {
-  state.hideTrace = !state.hideTrace;
-  e.target.classList.toggle('active', state.hideTrace);
-  e.target.textContent = state.hideTrace ? 'Show TRACE' : 'Hide TRACE';
-  applyFilters();
-  fullRender();
-});
-
-document.getElementById('autoScrollBtn').addEventListener('click', (e) => {
-  state.autoScroll = !state.autoScroll;
-  e.target.textContent = `Auto-scroll: ${state.autoScroll ? 'ON' : 'OFF'}`;
-  e.target.classList.toggle('active', state.autoScroll);
-});
-
-document.getElementById('prevError').addEventListener('click', () => jumpToError('prev'));
-document.getElementById('nextError').addEventListener('click', () => jumpToError('next'));
-
-document.getElementById('resetBtn').addEventListener('click', () => {
-  state.searchTerm = ''; state.hideTrace = false; state.levelFilter = 'all'; state.podFilter = 'all'; state.reqidFilter = 'all';
-  document.getElementById('searchInput').value = '';
-  document.getElementById('levelFilter').value = 'all';
-  document.getElementById('podFilter').value = 'all';
-  document.getElementById('reqidFilter').value = 'all';
-  document.getElementById('hideTraceBtn').classList.remove('active');
-  document.getElementById('hideTraceBtn').textContent = 'Hide TRACE';
-  applyFilters();
-  fullRender();
-});
-
-document.getElementById('exportBtn').addEventListener('click', () => {
-  const text = state.filtered.map(i => state.rawLines[i]).join('\n');
-  const blob = new Blob([text], { type: 'text/plain' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `logs-filtered-${new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-')}.txt`;
-  a.click();
-  toast('Exported filtered logs');
-});
-
-document.getElementById('saveBtn').addEventListener('click', () => {
-  send({ action: 'save-capture', lines: state.rawLines });
-});
-
-// Error banner click
-document.getElementById('errorBanner').addEventListener('click', () => jumpToError('next'));
-
-// Log container clicks (pod filter, reqid filter, json expand)
-document.getElementById('logContainer').addEventListener('click', (e) => {
-  const podEl = e.target.closest('.line-pod');
-  if (podEl && podEl.dataset.pod) {
-    state.podFilter = podEl.dataset.pod;
-    document.getElementById('podFilter').value = podEl.dataset.pod;
-    applyFilters(); fullRender();
-    toast(`Filtered to ${shortPod(podEl.dataset.pod)}`);
-    return;
-  }
-
-  const reqEl = e.target.closest('.line-reqid');
-  if (reqEl && reqEl.dataset.reqid) {
-    state.reqidFilter = reqEl.dataset.reqid;
-    document.getElementById('reqidFilter').value = reqEl.dataset.reqid;
-    applyFilters(); fullRender();
-    toast(`Filtered to request ${shortReqId(reqEl.dataset.reqid)}`);
-    return;
-  }
-
-  const jsonExpand = e.target.closest('.json-expand');
-  if (jsonExpand) {
-    const lineIdx = parseInt(jsonExpand.dataset.lineIdx);
-    const existing = document.getElementById('json-detail-' + lineIdx);
-    if (existing) {
-      existing.classList.toggle('visible');
-      jsonExpand.textContent = existing.classList.contains('visible') ? '[-]' : '[+]';
-    } else {
-      const line = state.lines[lineIdx];
-      if (line) {
-        const logLine = jsonExpand.closest('.log-line');
-        logLine.insertAdjacentHTML('afterend', renderJsonDetail(line));
-        document.getElementById('json-detail-' + lineIdx).classList.add('visible');
-        jsonExpand.textContent = '[-]';
-      }
-    }
-  }
-});
-
-// Keyboard shortcuts
-document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); document.getElementById('searchInput').focus(); }
-  if (e.key === 'Escape') { document.getElementById('searchInput').blur(); if (state.searchTerm) { state.searchTerm = ''; document.getElementById('searchInput').value = ''; applyFilters(); fullRender(); } }
-  if ((e.ctrlKey || e.metaKey) && e.key === 'e') { e.preventDefault(); jumpToError(e.shiftKey ? 'prev' : 'next'); }
-});
-
-// Paste support
-document.addEventListener('paste', (e) => {
-  if (e.target.tagName === 'INPUT') return;
-  const text = e.clipboardData.getData('text');
-  if (text && text.length > 50) { e.preventDefault(); loadFromFile(text); }
-});
-
-// ---- Init ----
-connectWs();
-</script>
+<!-- JSON Inspector Panel -->
+<div class="inspect-panel" id="inspectPanel">
+  <div class="ip-header">
+    <span class="ip-title" id="ipTitle">JSON Inspector</span>
+    <div class="ip-actions">
+      <button class="btn" id="ipExpand" title="Expand all">Expand</button>
+      <button class="btn" id="ipCollapse" title="Collapse all">Collapse</button>
+      <button class="btn" id="ipCopy" title="Copy JSON to clipboard">Copy</button>
+      <button class="btn" id="ipClose">&times;</button>
+    </div>
+  </div>
+  <div class="ip-body" id="ipBody"></div>
+</div>
+
+<!-- Trace Panel -->
+<div class="trace-panel" id="tracePanel">
+  <div class="tp-header">
+    <span class="tp-title" id="tpTitle">Flow Trace</span>
+    <button class="btn" id="tpClose">&times;</button>
+  </div>
+  <div class="tp-body" id="tpBody"></div>
+</div>
+
+<script src="viewer.js"></script>
 </body>
 </html>

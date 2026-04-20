@@ -1,5 +1,46 @@
-const AGENT_URL = 'ws://localhost:4040';
-console.log('[Kube Logger viewer] build:ns-color-v1 loaded');
+// SaaS viewer: connects to the relay as a consumer using ?s=<session> from the URL.
+console.log('[Kube Logger web viewer] build:saas-v1 loaded');
+
+// Read session from URL (?s=<id> or ?session=<id>).
+const _urlParams = new URLSearchParams(location.search);
+const SESSION_ID = (_urlParams.get('s') || _urlParams.get('session') || '').trim();
+const AGENT_URL = (() => {
+  // Same host as the page, /consumer?session=<id>. Use wss:// if the page is https.
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${location.host}/consumer?session=${encodeURIComponent(SESSION_ID)}`;
+})();
+
+// Stub the chrome.* APIs used by the shared viewer logic so calls are harmless
+// when running as a plain web page (not inside the extension).
+const chrome = (typeof window !== 'undefined' && window.chrome && window.chrome.storage)
+  ? window.chrome
+  : (() => {
+      const LS_PREFIX = 'chrome-shim:';
+      return {
+        storage: {
+          local: {
+            get(keys, cb) {
+              const out = {};
+              const arr = typeof keys === 'string' ? [keys]
+                : Array.isArray(keys) ? keys
+                : keys && typeof keys === 'object' ? Object.keys(keys)
+                : [];
+              for (const k of arr) {
+                const raw = localStorage.getItem(LS_PREFIX + k);
+                if (raw !== null) { try { out[k] = JSON.parse(raw); } catch {} }
+              }
+              (cb || (() => {}))(out);
+            },
+            set(obj, cb) {
+              for (const [k, v] of Object.entries(obj || {})) localStorage.setItem(LS_PREFIX + k, JSON.stringify(v));
+              (cb || (() => {}))();
+            },
+          },
+          onChanged: { addListener() {} },
+        },
+        runtime: { sendMessage() {} },
+      };
+    })();
 // One-time migration from the old `io-*` localStorage keys.
 (function migrateStorageKeys(){
   const map = {
@@ -1142,6 +1183,11 @@ function addLive(raw,ns){
 
 // ── WebSocket ─────────────────
 function connect(){
+  if(!SESSION_ID){
+    $('cLabel').textContent='No session — add ?s=<id> to the URL';
+    setConn(false);
+    return;
+  }
   try{S.ws=new WebSocket(AGENT_URL);}catch{return setConn(false);}
   S.ws.onopen=()=>setConn(true);
   S.ws.onclose=()=>{setConn(false);setTimeout(connect,3000);};
@@ -1149,6 +1195,20 @@ function connect(){
   S.ws.onmessage=ev=>{
     const m=JSON.parse(ev.data);
     switch(m.type){
+      // Relay-specific control messages
+      case'relay-hello':
+        $('cLabel').textContent=m.producerConnected?'Agent connected':'Waiting for agent…';
+        break;
+      case'producer-ready':
+        $('cLabel').textContent='Agent connected';
+        toast('Agent connected');
+        break;
+      case'producer-gone':
+        $('cLabel').textContent='Agent disconnected';
+        setCap(false);
+        toast('Agent disconnected');
+        break;
+
       case'init':
         if(m.auth&&(m.auth.ok||m.auth.authenticated)){
           $('cLabel').textContent=m.auth.arn?m.auth.arn.split('/').pop():'Authenticated';

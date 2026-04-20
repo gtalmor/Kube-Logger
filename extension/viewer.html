@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IO Log Viewer</title>
+<title>Kube Logger</title>
 <style>
   :root {
     --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
@@ -28,6 +28,34 @@
   .stats .s { display:flex; align-items:center; gap:3px; }
   .stats .s .d { width:7px; height:7px; border-radius:50%; }
   .stats .s .d.er { background:var(--error); } .stats .s .d.wr { background:var(--warn); } .stats .s .d.db { background:var(--debug); } .stats .s .d.tr { background:var(--trace); } .stats .s .d.ht { background:var(--error); } .stats .s .d.to { background:var(--accent); }
+
+  /* Namespace legend */
+  .ns-legend { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .ns-chip { display:inline-flex; align-items:center; gap:5px; padding:2px 7px; background:var(--bg3); border:1px solid var(--border); border-radius:10px; font-size:10px; color:var(--text); }
+  .ns-chip:hover { border-color:var(--accent); }
+  .ns-chip .ns-ct { color:var(--muted); font-size:9px; }
+  .ns-chip input[type=color] {
+    width:16px; height:14px; padding:0;
+    border:1px solid var(--border); border-radius:3px;
+    background:transparent; cursor:pointer; flex-shrink:0;
+  }
+  .ns-chip input[type=color]::-webkit-color-swatch-wrapper { padding:0; }
+  .ns-chip input[type=color]::-webkit-color-swatch { border:none; border-radius:2px; }
+
+  /* Per-line namespace indicator:
+     - full-row background tint applied via background-image (gradient) so it
+       stacks ON TOP of any level-specific background-color (ERROR red etc.)
+       while leaving text fully readable
+     - 3px solid left stripe for a hard visual anchor */
+  .ll {
+    position:relative;
+    background-image: linear-gradient(var(--ns-bg,transparent), var(--ns-bg,transparent));
+  }
+  .ll .ll-ns-stripe {
+    position:absolute; left:0; top:0; bottom:0; width:3px;
+    background:var(--ns-color,transparent);
+    pointer-events:none;
+  }
 
   /* ── Controls ── */
   select,.btn,input[type=text] { background:var(--bg); border:1px solid var(--border); color:var(--text); font-family:inherit; font-size:12px; padding:5px 10px; border-radius:5px; cursor:pointer; outline:none; }
@@ -117,20 +145,22 @@
   .lc { flex:1; overflow-y:auto; overflow-x:hidden; display:none; font-size:12px; line-height:1.6; }
   .lc.v { display:block; }
 
+  /* NOTE: use background-color (not `background:` shorthand) everywhere so we don't
+     wipe out the ns tint gradient (.ll { background-image: ... }) that layers on top. */
   .ll { padding:1px 20px; display:flex; border-bottom:1px solid transparent; white-space:pre-wrap; word-break:break-all; }
-  .ll:hover { background:rgba(255,255,255,.03); }
-  .ll.lERROR,.ll.lFATAL { background:rgba(248,81,73,.06); border-bottom-color:rgba(248,81,73,.1); }
-  .ll.lWARN { background:rgba(210,153,34,.06); }
+  .ll:hover { background-color:rgba(255,255,255,.03); }
+  .ll.lERROR,.ll.lFATAL { background-color:rgba(248,81,73,.06); border-bottom-color:rgba(248,81,73,.1); }
+  .ll.lWARN { background-color:rgba(210,153,34,.06); }
   .ll.lTRACE { opacity:.45; } .ll.lTRACE:hover { opacity:.8; }
-  .ll.h5 { background:rgba(248,81,73,.1); border-bottom-color:rgba(248,81,73,.2); }
-  .ll.h4 { background:rgba(210,153,34,.06); }
-  .ll.fl { background:rgba(248,81,73,.08); border-left:3px solid var(--error); }
-  .ll.lplain { border-left:3px solid var(--warn); background:rgba(210,153,34,.04); }
-  .ll.lmulti { border-top:none; border-left-color:var(--border); background:rgba(210,153,34,.02); }
+  .ll.h5 { background-color:rgba(248,81,73,.1); border-bottom-color:rgba(248,81,73,.2); }
+  .ll.h4 { background-color:rgba(210,153,34,.06); }
+  .ll.fl { background-color:rgba(248,81,73,.08); border-left:3px solid var(--error); }
+  .ll.lplain { border-left:3px solid var(--warn); background-color:rgba(210,153,34,.04); }
+  .ll.lmulti { border-top:none; border-left-color:var(--border); background-color:rgba(210,153,34,.02); }
   .ll.lmulti .lp { color:var(--border); font-size:14px; }
-  .ll.lscript-err { border-left:3px solid var(--error); background:rgba(248,81,73,.08); }
-  .ll.lerror-detail { border-left:3px solid var(--error); background:rgba(248,81,73,.12); font-weight:600; }
-  .ll.hl { background:rgba(88,166,255,.15); border-left:3px solid var(--accent); }
+  .ll.lscript-err { border-left:3px solid var(--error); background-color:rgba(248,81,73,.08); }
+  .ll.lerror-detail { border-left:3px solid var(--error); background-color:rgba(248,81,73,.12); font-weight:600; }
+  .ll.hl { background-color:rgba(88,166,255,.15); border-left:3px solid var(--accent); }
   .lh { opacity:0; color:var(--muted); cursor:pointer; padding:0 6px; flex-shrink:0; font-size:14px; transition:opacity .15s; }
   .ll:hover .lh { opacity:.4; } .lh:hover { opacity:1!important; color:var(--error); }
 
@@ -145,7 +175,8 @@
   .hp-remove { color:var(--muted); cursor:pointer; font-size:16px; padding:0 4px; flex-shrink:0; } .hp-remove:hover { color:var(--error); }
   .hp-empty { padding:16px; color:var(--muted); text-align:center; }
 
-  .ln { color:var(--trace); min-width:48px; text-align:right; padding-right:10px; user-select:none; flex-shrink:0; }
+  .ln { color:var(--trace); min-width:48px; text-align:right; padding-right:10px; user-select:none; flex-shrink:0; cursor:pointer; }
+  .ln:hover { color:var(--accent); text-decoration:underline; }
   .lt { color:var(--muted); min-width:95px; flex-shrink:0; padding-right:6px; }
   .lv { min-width:50px; flex-shrink:0; padding-right:6px; font-weight:600; }
   .lv.ERROR,.lv.FATAL { color:var(--error); } .lv.WARN { color:var(--warn); } .lv.INFO { color:var(--info); }
@@ -156,6 +187,14 @@
   .lr:hover { opacity:1; text-decoration:underline; }
   .lm { flex:1; min-width:0; }
   .lm .hi { background:rgba(210,153,34,.4); color:var(--bright); border-radius:2px; padding:0 2px; }
+  .lm .hi0 { background:rgba(230,219,116,.35); color:#e6db74; } .lm .hi1 { background:rgba(166,226,46,.25); color:#a6e22e; }
+  .lm .hi2 { background:rgba(102,217,239,.25); color:#66d9ef; } .lm .hi3 { background:rgba(253,151,31,.3); color:#fd971f; }
+  .lm .hi4 { background:rgba(174,129,255,.3); color:#ae81ff; } .lm .hi5 { background:rgba(249,38,114,.25); color:#f92672; }
+  .lm .hi6 { background:rgba(230,219,116,.35); color:#e6db74; } .lm .hi7 { background:rgba(161,239,228,.25); color:#a1efe4; }
+  .hi-add { display:flex; gap:6px; padding:8px 14px; border-bottom:1px solid var(--border); }
+  .hi-add input { flex:1; background:var(--bg); border:1px solid var(--border); color:var(--text); font-family:inherit; font-size:12px; padding:5px 8px; border-radius:4px; outline:none; }
+  .hi-add input:focus { border-color:var(--accent); }
+  .hi-swatch { width:12px; height:12px; border-radius:2px; flex-shrink:0; }
   .hs { font-weight:700; padding:0 3px; border-radius:3px; }
   .hs.s5 { color:var(--error); background:rgba(248,81,73,.15); }
   .hs.s4 { color:var(--warn); background:rgba(210,153,34,.15); }
@@ -222,6 +261,38 @@
   .tp-flow-tag.fail { background:rgba(248,81,73,.15); color:var(--error); }
   .tp-empty { color:var(--muted); font-size:12px; text-align:center; padding:20px; }
 
+  /* ── JSON Inspector ── */
+  .jin { cursor:pointer; color:var(--accent); opacity:.55; margin-left:6px; font-size:10px; font-family:inherit; padding:0 4px; border-radius:3px; border:1px solid var(--border); background:var(--bg); }
+  .jin:hover { opacity:1; background:var(--bg3); border-color:var(--accent); }
+  .inspect-panel { position:fixed; left:0; top:0; width:540px; height:100vh; background:var(--bg2); border-right:2px solid var(--accent); z-index:100; display:none; flex-direction:column; box-shadow:4px 0 20px rgba(0,0,0,.5); }
+  .inspect-panel.v { display:flex; }
+  .ip-header { padding:10px 14px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; flex-shrink:0; gap:6px; }
+  .ip-title { font-size:13px; font-weight:600; color:var(--bright); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ip-actions { display:flex; gap:4px; flex-shrink:0; }
+  .ip-actions .btn { padding:3px 8px; font-size:11px; }
+  .ip-body { flex:1; overflow:auto; padding:12px 14px; font-size:12px; line-height:1.55; font-family:'SF Mono','Cascadia Code','Fira Code','JetBrains Mono','Consolas',monospace; }
+
+  .jv-row { white-space:pre-wrap; word-break:break-word; }
+  .jv-body { border-left:1px dashed var(--border); margin-left:5px; padding-left:11px; }
+  .jv-body.jv-collapsed { display:none; }
+  .jv-close.jv-collapsed { display:none; }
+  .jv-tog { display:inline-block; width:12px; text-align:center; cursor:pointer; color:var(--muted); user-select:none; margin-right:3px; font-size:9px; }
+  .jv-tog:hover { color:var(--accent); }
+  .jv-k { color:var(--accent); }
+  .jv-str { color:var(--success); }
+  .jv-num { color:var(--warn); }
+  .jv-bool { color:#d2a8ff; }
+  .jv-null { color:var(--error); }
+  .jv-br { color:var(--muted); }
+  .jv-count { color:var(--trace); font-size:10px; margin-left:6px; }
+  .jv-hint { color:var(--trace); font-size:10px; font-style:italic; margin:0 4px; }
+  .jv-more { color:var(--accent); cursor:pointer; font-size:10px; opacity:.7; margin-left:4px; }
+  .jv-more:hover { opacity:1; text-decoration:underline; }
+  .jv-hide { display:none; }
+  .jv-preview { color:var(--muted); font-size:10px; margin-left:6px; font-style:italic; }
+  .jv-body.jv-collapsed + .jv-close { display:none; }
+  .jv-row:hover { background:rgba(255,255,255,.02); }
+
   ::-webkit-scrollbar { width:7px; } ::-webkit-scrollbar-track { background:var(--bg); } ::-webkit-scrollbar-thumb { background:var(--bg3); border-radius:4px; } ::-webkit-scrollbar-thumb:hover { background:var(--border); }
   @media(max-width:800px) { .lp,.lr { display:none; } }
 </style>
@@ -231,21 +302,20 @@
 <!-- Top bar -->
 <div class="bar">
   <span class="dot" id="cDot"></span>
-  <h1>IO Log Viewer</h1>
+  <h1>Kube Logger</h1>
   <span class="status-text" id="cLabel">Connecting...</span>
-
-  <div class="sep"></div>
-  <select id="nsSelect"><option value="">Select Namespace...</option></select>
-  <button class="btn" id="loadNsBtn">Load NS</button>
-  <button class="btn primary" id="startBtn" disabled>Start Capture</button>
-  <button class="btn recording" id="stopBtn" style="display:none">Stop Capture</button>
   <button class="btn" id="clearBtn" style="display:none">Clear</button>
-
+  <span id="buildTag" style="font-size:9px;color:var(--muted);opacity:0.6;letter-spacing:0.5px">build:ns-color-v1</span>
+  <div class="ns-legend" id="nsLegend"></div>
   <div class="stats" id="stats"></div>
 </div>
 
 <!-- Filter bar -->
 <div class="bar" id="filterBar" style="display:none">
+  <select id="presetSelect" title="Active filter preset"><option value="">— Preset —</option></select>
+  <button class="btn" id="presetSave" title="Save current filters as a named preset">Save as…</button>
+  <button class="btn" id="presetDel" title="Delete the selected preset" disabled>×</button>
+  <div class="sep"></div>
   <div class="search-box">
     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Zm-.82 4.74a6 6 0 1 1 1.06-1.06l3.04 3.04a.75.75 0 1 1-1.06 1.06l-3.04-3.04Z"/></svg>
     <input type="text" id="searchInput" placeholder="Search (regex)" />
@@ -255,6 +325,7 @@
   <select id="podFilter"><option value="all">All Services</option></select>
   <select id="reqidFilter"><option value="all">All Requests</option></select>
   <div class="sep"></div>
+  <button class="btn" id="highlightBtn">Highlights</button>
   <button class="btn" id="hiddenBtn">Hidden</button>
   <button class="btn" id="hideTrace">Hide TRACE</button>
   <button class="btn ej" id="prevErr">&#9650; Err</button>
@@ -281,6 +352,20 @@
 <!-- Logs -->
 <div class="lc" id="lc"></div>
 <div class="toast" id="toast"></div>
+
+<!-- JSON Inspector Panel -->
+<div class="inspect-panel" id="inspectPanel">
+  <div class="ip-header">
+    <span class="ip-title" id="ipTitle">JSON Inspector</span>
+    <div class="ip-actions">
+      <button class="btn" id="ipExpand" title="Expand all">Expand</button>
+      <button class="btn" id="ipCollapse" title="Collapse all">Collapse</button>
+      <button class="btn" id="ipCopy" title="Copy JSON to clipboard">Copy</button>
+      <button class="btn" id="ipClose">&times;</button>
+    </div>
+  </div>
+  <div class="ip-body" id="ipBody"></div>
+</div>
 
 <!-- Trace Panel -->
 <div class="trace-panel" id="tracePanel">

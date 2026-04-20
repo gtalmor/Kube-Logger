@@ -1,17 +1,20 @@
 {
-  "name": "io-log-viewer",
+  "name": "kube-logger",
   "version": "1.0.0",
-  "description": "Live Kubernetes log viewer with auth management, capture controls, and visual analysis",
-  "main": "server.js",
+  "description": "Kube Logger SaaS — central relay + web viewer (server/, public/), per-user local agent (agent/), Chrome extension control panel (extension/).",
+  "main": "server/index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon --watch server.js --watch public server.js"
+    "start": "node server/index.js",
+    "start:server": "node server/index.js",
+    "start:agent": "node agent/index.js",
+    "dev": "nodemon --watch server --watch public server/index.js",
+    "dev:server": "nodemon --watch server --watch public server/index.js",
+    "dev:agent": "nodemon --watch agent agent/index.js"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
   },
   "dependencies": {
-    "express": "^4.21.0",
     "ws": "^8.18.0"
   }
 }

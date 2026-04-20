@@ -1,0 +1,50 @@
+name: Deploy SaaS relay
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy via SSH
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          APP_DIR:  ${{ secrets.APP_DIR }}
+        run: |
+          ssh "$SSH_USER@$SSH_HOST" bash -lc "'
+            set -euo pipefail
+            cd \"$APP_DIR\"
+            git fetch --all --prune
+            git reset --hard origin/main
+            npm ci --omit=dev
+            mkdir -p logs
+            # First run starts; subsequent runs reload in place.
+            if pm2 describe logviewer >/dev/null 2>&1; then
+              pm2 reload logviewer --update-env
+            else
+              pm2 start ecosystem.config.js --env production
+              pm2 save
+            fi
+            pm2 describe logviewer | sed -n 1,40p
+          '"
