@@ -1275,8 +1275,7 @@ function connect(){
       // (producer present on the relay), not just our own WS connection — the
       // consumer socket can be up while the user's local agent is down.
       case'relay-hello':
-        $('cLabel').textContent=m.producerConnected?'Agent connected':'Waiting for agent…';
-        $('cDot').className='dot '+(m.producerConnected?'ok':'fail');
+        setAgentConnected(!!m.producerConnected, m.producerConnected?'Agent connected':'Waiting for agent…');
         applyReadOnlyMode(!!m.readOnly);
         if(m.producerConnected&&!m.readOnly)send({action:'get-init'});
         break;
@@ -1287,14 +1286,12 @@ function connect(){
         ShareView.onInviteRevoked(m);
         break;
       case'producer-ready':
-        $('cLabel').textContent='Agent connected';
-        $('cDot').className='dot ok';
+        setAgentConnected(true,'Agent connected');
         toast('Agent connected');
         send({action:'get-init'});
         break;
       case'producer-gone':
-        $('cLabel').textContent='Agent disconnected';
-        $('cDot').className='dot fail';
+        setAgentConnected(false,'Agent disconnected');
         setCap(false);
         toast('Agent disconnected');
         break;
@@ -1354,7 +1351,11 @@ function connect(){
       case'stderr':if(m.msg&&!m.msg.includes('Experimental'))toast((m.ns?`[${m.ns}] `:'')+m.msg.slice(0,80));break;
       case'error':toast('Error: '+(m.msg||'unknown'));break;
       case'auth-status':
-        $('cLabel').textContent=(m.ok||m.authenticated)?(m.arn?m.arn.split('/').pop():'Auth OK'):'Not authed';
+        // Don't let a late auth-status overwrite the disconnected label if the
+        // agent isn't around right now — the drawer still gets the state update.
+        if(agentConnected){
+          $('cLabel').textContent=(m.ok||m.authenticated)?(m.arn?m.arn.split('/').pop():'Auth OK'):'Not authed';
+        }
         Drawer.onAuthStatus(m);
         break;
       case'auth-progress':Drawer.onAuthProgress(m);break;
@@ -1369,9 +1370,22 @@ function send(m){if(S.ws&&S.ws.readyState===1)S.ws.send(JSON.stringify(m));}
 function badge(text,color){try{_ext.runtime.sendMessage({type:'badge',text,color});}catch{}}
 
 function setConn(ok){
+  // WS to the relay is open/closed. Mirror into agentConnected unless we've
+  // already learned more from relay-hello/producer-ready/producer-gone.
   $('cDot').className='dot '+(ok?'ok':'fail');
   $('cLabel').textContent=ok?'Connected':'Disconnected — agent not running?';
+  if(!ok)agentConnected=false;
   if(ok)badge('','#3fb950');
+}
+
+// Tracks whether the producer (agent) is present on the relay — distinct
+// from our own WS liveness. Handlers call setAgentConnected so late/out-of-
+// order auth-status messages can't resurrect a disconnected label.
+let agentConnected=false;
+function setAgentConnected(on,label){
+  agentConnected=on;
+  $('cDot').className='dot '+(on?'ok':'fail');
+  if(label)$('cLabel').textContent=label;
 }
 
 let timerIv;
