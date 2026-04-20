@@ -2051,14 +2051,6 @@ const Drawer = (() => {
         $('authInfo').textContent = 'Checking…';
       });
 
-      $('checkBtn').addEventListener('click', () => {
-        const p = $('profile').value;
-        if (!p) { $('authInfo').textContent = 'Select a profile first'; return; }
-        send({ action: 'check-auth', profile: p });
-        $('authDot').className = 'dot pending';
-        $('authInfo').textContent = 'Checking…';
-      });
-
       $('loginBtn').addEventListener('click', () => {
         const p = $('profile').value;
         if (!p) { $('authInfo').textContent = 'Select a profile first'; return; }
