@@ -17,25 +17,28 @@ const RELAY_HTTP_URL = (process.env.KUBE_LOGGER_RELAY || 'https://logviewer.gtal
 const RELAY_WS_URL = RELAY_HTTP_URL.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
 const CONFIG_DIR = path.join(os.homedir(), '.kube-logger');
 const SESSION_FILE = path.join(CONFIG_DIR, 'session');
+const PRODUCER_KEY_FILE = path.join(CONFIG_DIR, 'producer-key');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
-// Read the persisted session id, or generate and persist a new one.
-// Keeping the id stable across restarts means teammates can bookmark their
-// viewer URL once; a missing/too-short file gets rewritten with a fresh id.
-function loadOrCreateSession() {
+// Read a 16-byte hex secret from `file`, or generate and persist a new one.
+// Used for both the session id (public — in the viewer URL) and the producer
+// key (private — kept local so only this agent can own the session at the relay).
+function loadOrCreateSecret(file, label) {
   try {
-    const existing = fs.readFileSync(SESSION_FILE, 'utf8').trim();
+    const existing = fs.readFileSync(file, 'utf8').trim();
     if (existing.length >= 16) return existing;
   } catch {}
   const id = crypto.randomBytes(16).toString('hex');
   try {
     fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(SESSION_FILE, id + '\n', { mode: 0o600 });
+    fs.writeFileSync(file, id + '\n', { mode: 0o600 });
   } catch (e) {
-    console.error(`[session] could not persist to ${SESSION_FILE}: ${e.message}`);
+    console.error(`[${label}] could not persist to ${file}: ${e.message}`);
   }
   return id;
 }
+const loadOrCreateSession     = () => loadOrCreateSecret(SESSION_FILE, 'session');
+const loadOrCreateProducerKey = () => loadOrCreateSecret(PRODUCER_KEY_FILE, 'producer-key');
 
 // ── User config (profile→cluster mapping, region, disabled profiles) ───
 // Edited by hand at ~/.kube-logger/config.json. Shape:
@@ -127,8 +130,10 @@ function connectSaas() {
   if (saasProducer && saasProducer.readyState !== 3 /* CLOSED */) return;
   const { WebSocket } = require('ws');
   const { url, session } = saasTarget;
-  const wsUrl = `${url.replace(/\/+$/, '')}/producer?session=${encodeURIComponent(session)}`;
-  console.log(`[saas] connecting to ${wsUrl}`);
+  const wsUrl = `${url.replace(/\/+$/, '')}/producer?session=${encodeURIComponent(session)}&key=${encodeURIComponent(PRODUCER_KEY)}`;
+  // Log the session but not the key — the key is a secret that binds this
+  // agent to the relay-side session so stray producers can't hijack it.
+  console.log(`[saas] connecting to ${url.replace(/\/+$/, '')}/producer?session=${session}`);
   const ws = new WebSocket(wsUrl);
   saasProducer = ws;
 
@@ -462,6 +467,7 @@ wss.on('connection', ws => {
 });
 
 const SESSION_ID = loadOrCreateSession();
+const PRODUCER_KEY = loadOrCreateProducerKey();
 const VIEWER_URL = `${RELAY_HTTP_URL}/?session=${SESSION_ID}`;
 
 const clusterCount = Object.keys(CFG.clusters).length;

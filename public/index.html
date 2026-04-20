@@ -334,6 +334,35 @@
   .tri-count { color:var(--muted); font-size:10px; margin-left:4px; flex-shrink:0; }
   .tri-empty { padding:12px 8px; text-align:center; color:var(--muted); font-size:11px; }
 
+  /* ── Share-view popover ── */
+  .share-wrap { position:relative; display:inline-block; }
+  .share-pop {
+    display:none; position:absolute; top:calc(100% + 4px); right:0;
+    background:var(--bg2); border:1px solid var(--border); border-radius:6px;
+    padding:12px; width:340px; z-index:100;
+    box-shadow:0 4px 16px rgba(0,0,0,0.5);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+    font-size:12px;
+  }
+  .share-pop.v { display:block; }
+  .sp-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
+  .sp-row { display:flex; gap:6px; align-items:center; margin-top:8px; }
+  .sp-row > select, .sp-row > input[type=text] { flex:1; background:var(--bg3); border:1px solid var(--border); color:var(--text); font-family:inherit; font-size:12px; padding:6px 8px; border-radius:4px; outline:none; }
+  .sp-row > label { font-size:11px; color:var(--text); display:flex; align-items:center; gap:5px; cursor:pointer; }
+  .sp-hint { font-size:10px; color:var(--muted); margin-top:6px; line-height:1.4; }
+  .sp-result { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); display:none; }
+  .sp-result.v { display:block; }
+  .sp-url { word-break:break-all; background:var(--bg3); border:1px solid var(--border); border-radius:4px; padding:6px 8px; font-family:'SF Mono',monospace; font-size:10px; color:var(--accent); margin-top:4px; }
+  .sp-btn-primary { background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
+  .sp-btn-primary:hover { background:#79b8ff; }
+
+  .ro-banner {
+    display:inline-flex; align-items:center;
+    padding:2px 8px; border-radius:10px;
+    background:rgba(210,153,34,0.12); border:1px solid var(--warn);
+    color:var(--warn); font-size:10px; text-transform:uppercase; letter-spacing:0.5px;
+  }
+
   /* ── Setup drawer ── */
   .btn.setup-btn { font-size:11px; padding:4px 10px; }
   .setup-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; z-index:90; }
@@ -401,9 +430,14 @@
   <h1>Kube Logger</h1>
   <span class="status-text" id="cLabel">Connecting...</span>
   <button class="btn" id="clearBtn" style="display:none">Clear</button>
-  <span id="buildTag" style="font-size:9px;color:var(--muted);opacity:0.6;letter-spacing:0.5px">build:saas-v1 - 4/20</span>
+  <span id="buildTag" style="font-size:9px;color:var(--muted);opacity:0.6;letter-spacing:0.5px">build:saas-v10</span>
   <div class="ns-legend" id="nsLegend"></div>
   <div class="stats" id="stats"></div>
+  <span class="ro-banner" id="roBanner" style="display:none" title="You are viewing a read-only invite — you can't control the capture">read-only</span>
+  <div class="share-wrap" id="shareWrap">
+    <button class="btn setup-btn" id="shareBtn" title="Generate a read-only invite link to share this view">⇱ Share</button>
+    <div class="share-pop" id="sharePop"></div>
+  </div>
   <button class="btn setup-btn" id="setupBtn" title="Configure profile, namespaces, and start capture">⚙ Setup</button>
 </div>
 

@@ -1,12 +1,15 @@
 // SaaS viewer: connects to the relay as a consumer using ?s=<session> from the URL.
 console.log('[Kube Logger web viewer] build:saas-v1 loaded');
 
-// Read session from URL (?s=<id> or ?session=<id>).
+// Read session id (owner) or rotoken (invitee) from the URL.
+//   ?s=<id>      / ?session=<id>   → owner, full control
+//   ?rotoken=<t>                    → invitee, read-only; relay resolves to a session
 const _urlParams = new URLSearchParams(location.search);
 const SESSION_ID = (_urlParams.get('s') || _urlParams.get('session') || '').trim();
+const RO_TOKEN   = (_urlParams.get('rotoken') || '').trim();
 const AGENT_URL = (() => {
-  // Same host as the page, /consumer?session=<id>. Use wss:// if the page is https.
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (RO_TOKEN) return `${proto}//${location.host}/consumer?rotoken=${encodeURIComponent(RO_TOKEN)}`;
   return `${proto}//${location.host}/consumer?session=${encodeURIComponent(SESSION_ID)}`;
 })();
 
@@ -1256,8 +1259,8 @@ function addLive(raw,ns){
 
 // ── WebSocket ─────────────────
 function connect(){
-  if(!SESSION_ID){
-    $('cLabel').textContent='No session — add ?s=<id> to the URL';
+  if(!SESSION_ID&&!RO_TOKEN){
+    $('cLabel').textContent='No session — run kube-logger-agent and open the URL it prints.';
     setConn(false);
     return;
   }
@@ -1271,7 +1274,14 @@ function connect(){
       // Relay-specific control messages
       case'relay-hello':
         $('cLabel').textContent=m.producerConnected?'Agent connected':'Waiting for agent…';
-        if(m.producerConnected)send({action:'get-init'});
+        applyReadOnlyMode(!!m.readOnly);
+        if(m.producerConnected&&!m.readOnly)send({action:'get-init'});
+        break;
+      case'invite-created':
+        ShareView.onInviteCreated(m);
+        break;
+      case'invite-revoked':
+        ShareView.onInviteRevoked(m);
         break;
       case'producer-ready':
         $('cLabel').textContent='Agent connected';
@@ -1615,6 +1625,96 @@ $('presetDel').addEventListener('click',()=>{
   if(!confirm(`Delete preset "${S.currentPreset}"?`))return;
   deletePreset(S.currentPreset);
 });
+
+// ── Read-only mode (invitee) ────────────────────────────────────────
+// When the relay marks the consumer as read-only (invitee with ?rotoken=…),
+// hide the Setup and Share controls and show a pill in the top bar. The
+// relay already drops any consumer→producer messages, but disabling the UI
+// keeps the viewer from confusingly appearing to accept clicks.
+let readOnlyMode = false;
+function applyReadOnlyMode(on) {
+  readOnlyMode = on;
+  const setup = $('setupBtn');
+  const shareWrap = $('shareWrap');
+  const banner = $('roBanner');
+  if (on) {
+    if (setup) setup.style.display = 'none';
+    if (shareWrap) shareWrap.style.display = 'none';
+    if (banner) banner.style.display = '';
+  } else {
+    if (setup) setup.style.display = '';
+    if (shareWrap) shareWrap.style.display = '';
+    if (banner) banner.style.display = 'none';
+  }
+}
+
+// ── Share View: generate a read-only invite link ────────────────────
+// The producer (agent) asks the relay to mint a ~128-bit code with a TTL
+// and optional one-use flag; the relay replies with an `invite-created`
+// event that we turn into an absolute URL the user can copy + share.
+const ShareView = (() => {
+  function open()  { $('sharePop').classList.add('v'); render(); }
+  function close() { $('sharePop').classList.remove('v'); }
+
+  function render() {
+    $('sharePop').innerHTML = `
+      <div class="sp-label">Share this view (read-only)</div>
+      <div class="sp-row">
+        <select id="spTtl">
+          <option value="900">15 minutes</option>
+          <option value="3600" selected>1 hour</option>
+          <option value="14400">4 hours</option>
+          <option value="86400">1 day</option>
+        </select>
+        <label><input type="checkbox" id="spOneUse" checked /> One-use</label>
+      </div>
+      <button class="btn sp-btn-primary" id="spGenerate" style="margin-top:8px;width:100%">Generate invite link</button>
+      <div class="sp-hint">Invitees see logs live but can't start / stop captures or change settings. Links are 128-bit random; can't be guessed.</div>
+      <div class="sp-result" id="spResult"></div>
+    `;
+    $('spGenerate').addEventListener('click', () => {
+      const ttl = parseInt($('spTtl').value, 10);
+      const oneUse = $('spOneUse').checked;
+      $('spGenerate').disabled = true;
+      $('spGenerate').textContent = 'Generating…';
+      send({ action: 'create-invite', ttl, oneUse });
+    });
+  }
+
+  return {
+    toggle() { $('sharePop').classList.contains('v') ? close() : open(); },
+    close,
+    onInviteCreated(m) {
+      const absolute = `${location.origin}${m.path}`;
+      const expires = new Date(m.expiresAt).toLocaleString();
+      const result = $('spResult');
+      if (!result) return;
+      result.classList.add('v');
+      result.innerHTML = `
+        <div class="sp-label">Invite URL — copy & send</div>
+        <div class="sp-url" id="spUrl">${esc(absolute)}</div>
+        <div class="sp-row" style="gap:4px">
+          <button class="btn" id="spCopy" style="flex:1">Copy</button>
+          <span class="sp-hint" style="margin:0;flex:2">${m.oneUse ? 'Burns on first click.' : 'Multi-use.'} Expires ${esc(expires)}.</span>
+        </div>
+      `;
+      const btn = $('spGenerate');
+      if (btn) { btn.disabled = false; btn.textContent = 'Generate invite link'; }
+      $('spCopy').addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(absolute); toast('Copied'); }
+        catch { toast('Copy failed — select and copy manually'); }
+      });
+    },
+    onInviteRevoked() { toast('Invite revoked'); },
+  };
+})();
+
+if ($('shareBtn')) {
+  $('shareBtn').addEventListener('click', e => { e.stopPropagation(); ShareView.toggle(); });
+  $('sharePop').addEventListener('click', e => e.stopPropagation());
+  document.addEventListener('click', () => ShareView.close());
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') ShareView.close(); });
+}
 
 // ── Setup drawer ─────────────────────────────────────────────────────
 // Contains the popup controls (profile picker, SSO login, namespace picker,
