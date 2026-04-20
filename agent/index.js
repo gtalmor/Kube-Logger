@@ -471,6 +471,19 @@ console.log(`  Viewer: ${VIEWER_URL}\n`);
 
 setSaasTarget(RELAY_WS_URL, SESSION_ID);
 
+// Open the viewer in the user's default browser. Most OS openers focus an
+// existing tab if one is already on the same URL, so restarts don't spam
+// duplicate tabs. Set KUBE_LOGGER_NO_BROWSER=1 to skip (useful for headless
+// runs under pm2/systemd).
+if (!process.env.KUBE_LOGGER_NO_BROWSER) {
+  const opener = { darwin: 'open', linux: 'xdg-open', win32: 'start' }[process.platform];
+  if (opener) {
+    try {
+      spawn(opener, [VIEWER_URL], { stdio: 'ignore', detached: true, shell: process.platform === 'win32' }).unref();
+    } catch {}
+  }
+}
+
 // Periodic AWS auth re-check. Every 60s force a fresh check and broadcast
 // updated auth-status (including SSO expiresAt) to all clients, so popup +
 // viewer countdowns stay honest without each client polling.
