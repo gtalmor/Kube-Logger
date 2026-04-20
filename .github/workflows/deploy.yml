@@ -35,7 +35,7 @@ jobs:
           APP_DIR:  ${{ secrets.APP_DIR }}
         run: |
           rsync -az --delete \
-            --exclude=.git --exclude=node_modules --exclude=logs --exclude=.env \
+            --exclude=.git --exclude=node_modules --exclude=logs --exclude=.env --exclude=data \
             ./ "$SSH_USER@$SSH_HOST:$APP_DIR/"
 
       - name: Install deps and reload pm2
