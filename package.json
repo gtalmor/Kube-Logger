@@ -9,7 +9,13 @@
     "start:agent": "node agent/index.js",
     "dev": "nodemon --watch server --watch public server/index.js",
     "dev:server": "nodemon --watch server --watch public server/index.js",
-    "dev:agent": "nodemon --watch agent agent/index.js"
+    "dev:agent": "nodemon --watch agent agent/index.js",
+    "build": "bun build agent/index.js --compile --outfile dist/kube-logger-agent",
+    "build:darwin-arm64": "bun build agent/index.js --compile --target=bun-darwin-arm64 --outfile dist/kube-logger-agent-darwin-arm64",
+    "build:darwin-x64":   "bun build agent/index.js --compile --target=bun-darwin-x64   --outfile dist/kube-logger-agent-darwin-x64",
+    "build:linux-x64":    "bun build agent/index.js --compile --target=bun-linux-x64    --outfile dist/kube-logger-agent-linux-x64",
+    "build:linux-arm64":  "bun build agent/index.js --compile --target=bun-linux-arm64  --outfile dist/kube-logger-agent-linux-arm64",
+    "build:all": "bun run build:darwin-arm64 && bun run build:darwin-x64 && bun run build:linux-x64 && bun run build:linux-arm64"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
