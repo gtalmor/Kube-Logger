@@ -1298,7 +1298,11 @@ function connect(){
         if(m.auth&&(m.auth.ok||m.auth.authenticated)){
           $('cLabel').textContent=m.auth.arn?m.auth.arn.split('/').pop():'Authenticated';
         }
-        if(m.capturing)setCap(true,m.ns);
+        // Reloading mid-capture: make the log area visible so lines land on screen.
+        if(m.capturing){
+          setCap(true,m.ns);
+          $('lc').classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';
+        }
         Drawer.onInit(m);
         break;
       case'capture-start':case'capture-state':

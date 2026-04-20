@@ -3,14 +3,12 @@
 // Handles: auth checks, namespace listing, log streaming via stern/kubelog
 // All parsing & analysis happens in the Chrome extension (client-side)
 
-const { WebSocketServer } = require('ws');
 const { spawn, exec, execSync } = require('child_process');
 const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
-const PORT = parseInt(process.env.PORT || '4040', 10);
 // Override the relay target with KUBE_LOGGER_RELAY=http://localhost:4040 (or
 // wss://...) when you want to point a local agent at a local relay for testing.
 const RELAY_HTTP_URL = (process.env.KUBE_LOGGER_RELAY || 'https://logviewer.gtalmor.com').replace(/\/+$/, '');
@@ -96,11 +94,8 @@ let authCache = null;  // { ts, profile, ok, arn, err }
 
 // ── Helpers ─────────────────────────────────────────────────────────
 function broadcast(msg) {
-  const raw = JSON.stringify(msg);
-  for (const c of wss.clients) if (c.readyState === 1) c.send(raw);
-  // Also forward to the SaaS relay if configured.
   if (saasProducer && saasProducer.readyState === 1) {
-    try { saasProducer.send(raw); } catch {}
+    try { saasProducer.send(JSON.stringify(msg)); } catch {}
   }
 }
 
@@ -440,38 +435,12 @@ function stopCapture() {
   return result;
 }
 
-// ── WebSocket Server ────────────────────────────────────────────────
-const wss = new WebSocketServer({ port: PORT });
-
-wss.on('connection', ws => {
-  const send = m => { try { if (ws.readyState === 1) ws.send(JSON.stringify(m)); } catch {} };
-
-  // Send init state
-  send(buildInitMessage());
-
-  // If capturing, replay buffered lines
-  if (capture) {
-    send({ type: 'capture-state', ns: capture.nsList, start: capture.start, n: capture.lines.length });
-    for (let i = 0; i < capture.lines.length; i++) {
-      const { line, ns } = capture.lines[i];
-      send({ type: 'log', line, ns, i });
-    }
-  }
-
-  ws.on('message', async raw => {
-    try {
-      const msg = JSON.parse(raw.toString());
-      await handleAction(msg, send);
-    } catch (e) { send({ type: 'error', msg: e.message }); }
-  });
-});
-
 const SESSION_ID = loadOrCreateSession();
 const PRODUCER_KEY = loadOrCreateProducerKey();
 const VIEWER_URL = `${RELAY_HTTP_URL}/?session=${SESSION_ID}`;
 
 const clusterCount = Object.keys(CFG.clusters).length;
-console.log(`\n  Kube Logger Agent on ws://localhost:${PORT}  [build:ns-multi-v1]`);
+console.log(`\n  Kube Logger Agent  [build:no-local-ws-v1]`);
 console.log(`  Tool: ${LOG_TOOL} | Region: ${CFG.region} | Clusters configured: ${clusterCount || `0 — edit ${CONFIG_FILE}`}`);
 console.log(`  Viewer: ${VIEWER_URL}\n`);
 
