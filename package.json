@@ -1,6 +1,6 @@
 {
   "name": "kube-logger",
-  "version": "1.0.0",
+  "version": "0.1.2",
   "description": "Kube Logger — central relay + web viewer (server/, public/) plus a per-user local agent (agent/) that streams Kubernetes logs over WebSocket.",
   "main": "server/index.js",
   "scripts": {

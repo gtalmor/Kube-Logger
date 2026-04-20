@@ -1271,9 +1271,12 @@ function connect(){
   S.ws.onmessage=ev=>{
     const m=JSON.parse(ev.data);
     switch(m.type){
-      // Relay-specific control messages
+      // Relay-specific control messages. The top-bar dot tracks *agent* liveness
+      // (producer present on the relay), not just our own WS connection — the
+      // consumer socket can be up while the user's local agent is down.
       case'relay-hello':
         $('cLabel').textContent=m.producerConnected?'Agent connected':'Waiting for agent…';
+        $('cDot').className='dot '+(m.producerConnected?'ok':'fail');
         applyReadOnlyMode(!!m.readOnly);
         if(m.producerConnected&&!m.readOnly)send({action:'get-init'});
         break;
@@ -1285,11 +1288,13 @@ function connect(){
         break;
       case'producer-ready':
         $('cLabel').textContent='Agent connected';
+        $('cDot').className='dot ok';
         toast('Agent connected');
         send({action:'get-init'});
         break;
       case'producer-gone':
         $('cLabel').textContent='Agent disconnected';
+        $('cDot').className='dot fail';
         setCap(false);
         toast('Agent disconnected');
         break;

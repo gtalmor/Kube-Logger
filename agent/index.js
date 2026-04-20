@@ -1,13 +1,24 @@
 #!/usr/bin/env node
-// Kube Logger Agent — lightweight WebSocket relay
-// Handles: auth checks, namespace listing, log streaming via stern/kubelog
-// All parsing & analysis happens in the Chrome extension (client-side)
+// Kube Logger Agent — streams kube logs from the user's laptop to the hosted
+// relay + web viewer. Auth, namespace listing, and `stern`/`kubectl` live here;
+// parsing and rendering happen in the browser.
 
 const { spawn, exec, execSync } = require('child_process');
 const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+
+// Version comes from package.json, which the release workflow rewrites to the
+// tag (e.g. "0.1.3") before `bun build --compile` bundles it into the binary.
+const { version: VERSION } = require('../package.json');
+
+// Handle --version / -v before we do anything else (no relay connect, no
+// config file touched). Useful for `brew list --versions` cross-checks.
+if (process.argv.slice(2).some(a => a === '--version' || a === '-v')) {
+  console.log(`kube-logger-agent ${VERSION} (${process.platform}-${process.arch})`);
+  process.exit(0);
+}
 
 // Override the relay target with KUBE_LOGGER_RELAY=http://localhost:4040 (or
 // wss://...) when you want to point a local agent at a local relay for testing.
@@ -440,7 +451,7 @@ const PRODUCER_KEY = loadOrCreateProducerKey();
 const VIEWER_URL = `${RELAY_HTTP_URL}/?session=${SESSION_ID}`;
 
 const clusterCount = Object.keys(CFG.clusters).length;
-console.log(`\n  Kube Logger Agent  [build:no-local-ws-v1]`);
+console.log(`\n  Kube Logger Agent v${VERSION}`);
 console.log(`  Tool: ${LOG_TOOL} | Region: ${CFG.region} | Clusters configured: ${clusterCount || `0 — edit ${CONFIG_FILE}`}`);
 console.log(`  Viewer: ${VIEWER_URL}\n`);
 
