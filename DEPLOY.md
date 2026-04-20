@@ -62,19 +62,42 @@ sudo mkdir -p /var/www/logviewer
 sudo chown -R $USER:$USER /var/www/logviewer
 ```
 
-### 1c. Clone and install
+### 1c. Authenticate to GitHub (private repo)
+
+Install the GitHub CLI and log in once; it wires up git's credential helper so
+every subsequent `git fetch`/`git pull` on the box just works.
+
+```bash
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+  | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+  | sudo tee /etc/apt/sources.list.d/github-cli.list
+sudo apt update && sudo apt install -y gh
+
+# Interactive: pick GitHub.com → HTTPS → "Login with a web browser" → enter the
+# one-time code it prints at https://github.com/login/device.
+gh auth login
+gh auth setup-git
+```
+
+Verify: `gh auth status` should show you logged in.
+
+> Note: `gh auth login` authenticates as **you** (your whole GitHub account).
+> For a shared or long-lived server you'd prefer a read-only per-repo **Deploy
+> key** instead; see the `Option A` section in the original conversation or
+> swap in whenever you're ready.
+
+### 1d. Clone and install
 
 ```bash
 cd /var/www/logviewer
-git clone git@github.com:<your-org>/<your-repo>.git .
-# If the repo is public, an https URL works too:
-# git clone https://github.com/<your-org>/<your-repo>.git .
+git clone https://github.com/<your-org>/<your-repo>.git .
 
 npm ci --omit=dev
 mkdir -p logs
 ```
 
-### 1d. Start with pm2
+### 1e. Start with pm2
 
 ```bash
 pm2 start ecosystem.config.js --env production
@@ -89,7 +112,7 @@ curl -s http://127.0.0.1:4040/health  # → "ok"
 pm2 logs logviewer --lines 30
 ```
 
-### 1e. Put it behind Nginx Proxy Manager
+### 1f. Put it behind Nginx Proxy Manager
 
 In NPM's UI, add a new Proxy Host:
 
