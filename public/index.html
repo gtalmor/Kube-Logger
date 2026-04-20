@@ -296,6 +296,44 @@
   ::-webkit-scrollbar { width:7px; } ::-webkit-scrollbar-track { background:var(--bg); } ::-webkit-scrollbar-thumb { background:var(--bg3); border-radius:4px; } ::-webkit-scrollbar-thumb:hover { background:var(--border); }
   @media(max-width:800px) { .lp,.lr { display:none; } }
 
+  /* ── Tri-state filter popovers ── */
+  .tri-filter { position:relative; display:inline-block; }
+  .tri-btn { white-space:nowrap; }
+  .tri-btn.active { background:var(--bg3); border-color:var(--accent); color:var(--accent); }
+  .tri-pop {
+    display:none; position:absolute; top:calc(100% + 4px); left:0;
+    background:var(--bg2); border:1px solid var(--border); border-radius:6px;
+    padding:4px; min-width:240px; max-width:360px; max-height:360px;
+    overflow-y:auto; z-index:60;
+    box-shadow:0 4px 16px rgba(0,0,0,0.5);
+  }
+  .tri-pop.v { display:block; }
+  .tri-pop-header {
+    font-size:10px; color:var(--muted); padding:4px 8px;
+    display:flex; justify-content:space-between; align-items:center;
+    border-bottom:1px solid var(--border); margin-bottom:4px;
+  }
+  .tri-pop-clear { cursor:pointer; color:var(--accent); text-decoration:none; }
+  .tri-pop-clear:hover { text-decoration:underline; }
+  .tri-row {
+    display:flex; align-items:center; gap:8px;
+    padding:4px 8px; border-radius:4px; cursor:pointer;
+    font-size:11px; user-select:none;
+  }
+  .tri-row:hover { background:var(--bg3); }
+  .tri-state {
+    width:20px; height:20px; border-radius:4px; flex-shrink:0;
+    display:inline-flex; align-items:center; justify-content:center;
+    font-size:14px; font-weight:700; line-height:1;
+    border:1px solid var(--border); background:var(--bg);
+  }
+  .tri-state.inc { background:rgba(63,185,80,0.15); border-color:var(--success); color:var(--success); }
+  .tri-state.exc { background:rgba(248,81,73,0.15); border-color:var(--error); color:var(--error); }
+  .tri-state.neu { color:var(--muted); }
+  .tri-label { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tri-count { color:var(--muted); font-size:10px; margin-left:4px; flex-shrink:0; }
+  .tri-empty { padding:12px 8px; text-align:center; color:var(--muted); font-size:11px; }
+
   /* ── Setup drawer ── */
   .btn.setup-btn { font-size:11px; padding:4px 10px; }
   .setup-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; z-index:90; }
@@ -380,9 +418,18 @@
     <input type="text" id="searchInput" placeholder="Search (regex)" />
     <span class="sc" id="searchCount"></span>
   </div>
-  <select id="levelFilter"><option value="all">All Levels</option><option value="ERROR">ERROR</option><option value="WARN">WARN</option><option value="INFO">INFO</option><option value="DEBUG">DEBUG</option><option value="TRACE">TRACE</option><option value="HTTP">HTTP</option></select>
-  <select id="podFilter"><option value="all">All Services</option></select>
-  <select id="reqidFilter"><option value="all">All Requests</option></select>
+  <div class="tri-filter" data-filter="level">
+    <button class="btn tri-btn" id="levelBtn" data-base="Levels">All Levels</button>
+    <div class="tri-pop" id="levelPop"></div>
+  </div>
+  <div class="tri-filter" data-filter="pod">
+    <button class="btn tri-btn" id="podBtn" data-base="Services">All Services</button>
+    <div class="tri-pop" id="podPop"></div>
+  </div>
+  <div class="tri-filter" data-filter="req">
+    <button class="btn tri-btn" id="reqBtn" data-base="Requests">All Requests</button>
+    <div class="tri-pop" id="reqPop"></div>
+  </div>
   <div class="sep"></div>
   <button class="btn" id="highlightBtn">Highlights</button>
   <button class="btn" id="hiddenBtn">Hidden</button>

@@ -62,7 +62,10 @@ const HI_COLORS=['#e6db74','#a6e22e','#66d9ef','#fd971f','#ae81ff','#f92672','#e
 const S = {
   ws:null, lines:[], raw:[], filtered:[], errIdx:[], curErr:-1,
   pods:new Set(), reqs:new Map(), flowNodes:[],
-  search:'', hideTrace:false, level:'all', pod:'all', req:'all',
+  // Tri-state filters: { value: 'include'|'exclude' }. Empty = no filter.
+  // "include" entries act as a whitelist; "exclude" entries as a blacklist.
+  // If both exist, include wins (only include-matched values show).
+  search:'', hideTrace:false, level:{}, pod:{}, req:{},
   autoScroll:true, capturing:false, start:null, buf:[], scheduled:false,
   hiddenPatterns:JSON.parse(localStorage.getItem(HIDDEN_KEY)||'[]'),
   hiddenExecIds:new Set(),
@@ -244,11 +247,11 @@ function shouldShow(l){
   // 2. Your manually hidden flow executions (click × on flow label)
   if(S.hiddenExecIds.size&&l.flowExecId&&S.hiddenExecIds.has(l.flowExecId))return false;
   if(S.hiddenExecIds.size&&l.reqId&&S._hiddenReqIds&&S._hiddenReqIds.has(l.reqId))return false;
-  // 3. Filter dropdowns (only if you explicitly set them)
-  if(S.level!=='all'&&l.level!==S.level)return false;
+  // 3. Tri-state filters (only if you explicitly set them)
+  if(!triPass(S.level,l.level))return false;
   if(S.hideTrace&&l.level==='TRACE')return false;
-  if(S.pod!=='all'&&l.pod!==S.pod)return false;
-  if(S.req!=='all'&&l.reqId!==S.req)return false;
+  if(!triPass(S.pod,l.pod))return false;
+  if(!triPass(S.req,l.reqId))return false;
   // 4. Search
   if(S.search){try{if(!new RegExp(S.search,'i').test(l.raw||l.msg||''))return false;}catch{if(!(l.raw||l.msg||'').toLowerCase().includes(S.search.toLowerCase()))return false;}}
   return true;
@@ -261,7 +264,7 @@ function shouldShowAsContinuation(l){
   if(S.hiddenPatterns.length){const t=(l.msg||l.raw||'').toLowerCase();for(const p of S.hiddenPatterns){if(t.includes(p.toLowerCase()))return false;}}
   if(S.hiddenExecIds.size&&l.flowExecId&&S.hiddenExecIds.has(l.flowExecId))return false;
   if(S.hiddenExecIds.size&&l.reqId&&S._hiddenReqIds&&S._hiddenReqIds.has(l.reqId))return false;
-  if(S.pod!=='all'&&l.pod!==S.pod)return false;
+  if(!triPass(S.pod,l.pod))return false;
   return true;
 }
 
@@ -508,13 +511,81 @@ function showFailurePopover(anchor,l){
   setTimeout(()=>document.addEventListener('click',function cl(e){if(!pop.contains(e.target)){pop.remove();document.removeEventListener('click',cl);}},{once:false}),0);
 }
 
-function populateFilters(){
-  const ps=$('podFilter'),rs=$('reqidFilter');
-  ps.innerHTML='<option value="all">All Services</option>';
-  for(const p of[...S.pods].sort()){const o=document.createElement('option');o.value=p;o.textContent=shortPod(p);ps.appendChild(o);}
-  rs.innerHTML='<option value="all">All Requests</option>';
-  for(const[id,ct]of[...S.reqs.entries()].sort((a,b)=>b[1]-a[1])){const o=document.createElement('option');o.value=id;o.textContent=`${shortReq(id)} (${ct})`;rs.appendChild(o);}
+// ── Tri-state filter helpers ──
+// Each of S.level / S.pod / S.req is a { value: 'include'|'exclude' } map.
+// triPass: does `value` pass the filter? Empty map → always yes. Any include
+// flips the filter into whitelist mode (only matching values pass).
+function triPass(filter,value){
+  if(!filter)return true;
+  const keys=Object.keys(filter);
+  if(!keys.length)return true;
+  const state=filter[value];
+  const hasIncludes=keys.some(k=>filter[k]==='include');
+  if(hasIncludes)return state==='include';
+  return state!=='exclude';
 }
+function triCycle(filter,value){
+  const s=filter[value];
+  if(!s)filter[value]='include';
+  else if(s==='include')filter[value]='exclude';
+  else delete filter[value];
+}
+function triClear(filter){for(const k of Object.keys(filter))delete filter[k];}
+function triHasAny(filter){return Object.keys(filter||{}).length>0;}
+function triStateMark(s){
+  if(s==='include')return `<span class="tri-state inc">+</span>`;
+  if(s==='exclude')return `<span class="tri-state exc">−</span>`;
+  return `<span class="tri-state neu">·</span>`;
+}
+function triSummary(filter,baseLabel){
+  const incs=Object.values(filter||{}).filter(v=>v==='include').length;
+  const exs=Object.values(filter||{}).filter(v=>v==='exclude').length;
+  if(!incs&&!exs)return `All ${baseLabel}`;
+  const bits=[];
+  if(incs)bits.push(`+${incs}`);
+  if(exs)bits.push(`−${exs}`);
+  return `${baseLabel} (${bits.join(' ')})`;
+}
+
+// Rebuild the button label + popover body for one filter.
+function refreshTri(name){
+  const filter=({level:S.level,pod:S.pod,req:S.req})[name];
+  const btn=$(`${name}Btn`);
+  const pop=$(`${name}Pop`);
+  if(!btn||!pop)return;
+  btn.textContent=triSummary(filter,btn.dataset.base);
+  btn.classList.toggle('active',triHasAny(filter));
+
+  let options;
+  if(name==='level'){
+    options=['ERROR','WARN','INFO','DEBUG','TRACE','HTTP'].map(v=>({value:v,label:v}));
+  } else if(name==='pod'){
+    options=[...S.pods].sort().map(p=>({value:p,label:shortPod(p)}));
+  } else {
+    options=[...S.reqs.entries()].sort((a,b)=>b[1]-a[1]).map(([id,ct])=>({value:id,label:shortReq(id),count:ct}));
+  }
+
+  let h=`<div class="tri-pop-header"><span>Click cycles: include → exclude → clear</span>`;
+  if(triHasAny(filter))h+=`<span class="tri-pop-clear" data-clear="1">Reset</span>`;
+  h+=`</div>`;
+  if(!options.length){
+    h+=`<div class="tri-empty">None yet</div>`;
+  } else {
+    for(const{value,label,count} of options){
+      const state=filter[value];
+      h+=`<div class="tri-row" data-value="${esc(value)}">`
+        +triStateMark(state)
+        +`<span class="tri-label" title="${esc(label)}">${esc(label)}</span>`
+        +(count!=null?`<span class="tri-count">(${count})</span>`:'')
+        +`</div>`;
+    }
+  }
+  pop.innerHTML=h;
+}
+
+function refreshAllTri(){refreshTri('level');refreshTri('pod');refreshTri('req');}
+
+function populateFilters(){refreshAllTri();}
 
 function scrollTo(idx){
   if(idx===undefined||idx===null){toast('No line index');return;}
@@ -638,9 +709,9 @@ function savePresetsToStorage(){
 function captureFilterState(){
   return{
     search:S.search,
-    level:S.level,
-    pod:S.pod,
-    req:S.req,
+    level:{...S.level},
+    pod:{...S.pod},
+    req:{...S.req},
     hideTrace:S.hideTrace,
     hiddenPatterns:[...S.hiddenPatterns],
     hiddenExecIds:[...S.hiddenExecIds],
@@ -648,26 +719,28 @@ function captureFilterState(){
   };
 }
 
+// Older presets may have { level:'all'|'ERROR', ... } shape — migrate to tri-state.
+function migrateFilterField(v){
+  if(v&&typeof v==='object')return {...v};
+  if(!v||v==='all')return {};
+  return {[v]:'include'};
+}
+
 function applyFilterState(state){
   S.search=state.search||'';
-  S.level=state.level||'all';
-  S.pod=state.pod||'all';
-  S.req=state.req||'all';
+  S.level=migrateFilterField(state.level);
+  S.pod=migrateFilterField(state.pod);
+  S.req=migrateFilterField(state.req);
   S.hideTrace=!!state.hideTrace;
   S.hiddenPatterns=[...(state.hiddenPatterns||[])];
   S.hiddenExecIds=new Set(state.hiddenExecIds||[]);
   S.highlights=[...(state.highlights||[])];
-  // Persist the individual keys (maintains existing cross-session behavior)
   localStorage.setItem(HIDDEN_KEY,JSON.stringify(S.hiddenPatterns));
   localStorage.setItem(HIGHLIGHT_KEY,JSON.stringify(S.highlights));
-  // Update UI controls
   $('searchInput').value=S.search;
-  $('levelFilter').value=S.level;
-  // pod/req may reference a value that isn't in the current dropdown; selects silently ignore
-  $('podFilter').value=S.pod;
-  $('reqidFilter').value=S.req;
   $('hideTrace').classList.toggle('active',S.hideTrace);
   $('hideTrace').textContent=S.hideTrace?'Show TRACE':'Hide TRACE';
+  refreshAllTri();
   updateHiddenBtn();
   updateHighlightBtn();
   rebuildHiddenReqIds();
@@ -1419,17 +1492,54 @@ $('ipBody').addEventListener('click',e=>{
 });
 
 let sto;$('searchInput').addEventListener('input',e=>{clearTimeout(sto);sto=setTimeout(()=>{S.search=e.target.value.trim();rebuildFiltered();fullRender();},200);});
-$('levelFilter').addEventListener('change',e=>{S.level=e.target.value;rebuildFiltered();fullRender();});
-$('podFilter').addEventListener('change',e=>{S.pod=e.target.value;rebuildFiltered();fullRender();});
-$('reqidFilter').addEventListener('change',e=>{S.req=e.target.value;rebuildFiltered();fullRender();});
+// Tri-state filter wiring: button toggles the popover, row clicks cycle state.
+// Outside-click or Escape closes the popover.
+(function wireTriFilters(){
+  const filters={level:S.level,pod:S.pod,req:S.req};
+  function toggle(name){
+    for(const n of ['level','pod','req']){
+      const pop=$(`${n}Pop`);
+      if(n===name)pop.classList.toggle('v');
+      else pop.classList.remove('v');
+    }
+  }
+  function closeAll(){for(const n of ['level','pod','req'])$(`${n}Pop`).classList.remove('v');}
+
+  for(const name of ['level','pod','req']){
+    $(`${name}Btn`).addEventListener('click',e=>{e.stopPropagation();toggle(name);});
+    $(`${name}Pop`).addEventListener('click',e=>{
+      e.stopPropagation();
+      if(e.target.closest('.tri-pop-clear')){triClear(filters[name]);refreshTri(name);rebuildFiltered();fullRender();return;}
+      const row=e.target.closest('.tri-row');
+      if(!row)return;
+      triCycle(filters[name],row.dataset.value);
+      refreshTri(name);rebuildFiltered();fullRender();
+    });
+  }
+  document.addEventListener('click',()=>closeAll());
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeAll();});
+})();
 $('hideTrace').addEventListener('click',e=>{S.hideTrace=!S.hideTrace;e.target.classList.toggle('active',S.hideTrace);e.target.textContent=S.hideTrace?'Show TRACE':'Hide TRACE';rebuildFiltered();fullRender();});
 $('hiddenBtn').addEventListener('click',e=>{e.stopPropagation();showHiddenPanel();});
 $('highlightBtn').addEventListener('click',e=>{e.stopPropagation();showHighlightPanel();});
 $('autoScroll').addEventListener('click',e=>{S.autoScroll=!S.autoScroll;e.target.textContent=`Auto-scroll: ${S.autoScroll?'ON':'OFF'}`;e.target.classList.toggle('active',S.autoScroll);});
+// Turn auto-scroll OFF automatically if the user scrolls away from the bottom.
+// Programmatic scroll-to-bottom keeps distFromBottom ≈ 0, so this only fires
+// on a genuine manual scroll-up.
+$('lc').addEventListener('scroll',()=>{
+  if(!S.autoScroll)return;
+  const c=$('lc');
+  if(c.scrollHeight-c.scrollTop-c.clientHeight>40){
+    S.autoScroll=false;
+    const b=$('autoScroll');
+    b.textContent='Auto-scroll: OFF';
+    b.classList.remove('active');
+  }
+});
 $('prevErr').addEventListener('click',()=>jumpErr('prev'));
 $('nextErr').addEventListener('click',()=>jumpErr('next'));
 $('errBanner').addEventListener('click',()=>jumpErr('next'));
-$('resetBtn').addEventListener('click',()=>{S.search='';S.hideTrace=false;S.level='all';S.pod='all';S.req='all';$('searchInput').value='';$('levelFilter').value='all';$('podFilter').value='all';$('reqidFilter').value='all';$('hideTrace').classList.remove('active');$('hideTrace').textContent='Hide TRACE';rebuildFiltered();fullRender();});
+$('resetBtn').addEventListener('click',()=>{S.search='';S.hideTrace=false;triClear(S.level);triClear(S.pod);triClear(S.req);$('searchInput').value='';$('hideTrace').classList.remove('active');$('hideTrace').textContent='Hide TRACE';refreshAllTri();rebuildFiltered();fullRender();});
 $('exportBtn').addEventListener('click',()=>{const t=S.filtered.map(i=>S.raw[i]).join('\n');const b=new Blob([t],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`logs-${new Date().toISOString().slice(0,19).replace(/[:.]/g,'-')}.txt`;a.click();toast('Exported');});
 $('openFile').addEventListener('click',()=>$('fileInput').click());
 $('fileInput').addEventListener('change',e=>{const f=e.target.files[0];if(f){const r=new FileReader();r.onload=ev=>loadFile(ev.target.result);r.readAsText(f);}});
@@ -1449,11 +1559,11 @@ $('lc').addEventListener('click',e=>{
     const idx=+ln.dataset.jump;
     // Clear search (and any active line/trace filter that'd hide context) so neighbours reappear.
     const hadSearch=!!S.search;
-    if(hadSearch||S.level!=='all'||S.pod!=='all'||S.req!=='all'||S.hideTrace){
-      S.search='';S.level='all';S.pod='all';S.req='all';S.hideTrace=false;
+    if(hadSearch||triHasAny(S.level)||triHasAny(S.pod)||triHasAny(S.req)||S.hideTrace){
+      S.search='';triClear(S.level);triClear(S.pod);triClear(S.req);S.hideTrace=false;
       $('searchInput').value='';$('searchCount').textContent='';
-      $('levelFilter').value='all';$('podFilter').value='all';$('reqidFilter').value='all';
       $('hideTrace').classList.remove('active');$('hideTrace').textContent='Hide TRACE';
+      refreshAllTri();
       rebuildFiltered();fullRender();
       requestAnimationFrame(()=>scrollTo(idx));
       toast('Cleared filters — showing context around line '+(idx+1));
@@ -1464,9 +1574,9 @@ $('lc').addEventListener('click',e=>{
   }
   const hb=e.target.closest('.lh');if(hb){const idx=+hb.dataset.hide;const l=S.lines[idx];if(l){const pat=extractPattern(l);addHiddenPattern(pat);toast(`Hidden: "${pat.slice(0,40)}${pat.length>40?'...':''}"`);}return;}
   const fb=e.target.closest('.lfail');if(fb){e.stopPropagation();const idx=+fb.dataset.fail;const l=S.lines[idx];if(l)showFailurePopover(fb,l);return;}
-  const pod=e.target.closest('.lp');if(pod&&pod.dataset.pod){S.pod=pod.dataset.pod;$('podFilter').value=pod.dataset.pod;rebuildFiltered();fullRender();toast(`Filtered: ${shortPod(pod.dataset.pod)}`);return;}
+  const pod=e.target.closest('.lp');if(pod&&pod.dataset.pod){triClear(S.pod);S.pod[pod.dataset.pod]='include';refreshTri('pod');rebuildFiltered();fullRender();toast(`Filtered: ${shortPod(pod.dataset.pod)}`);return;}
   const req=e.target.closest('.lr');if(req&&req.dataset.req){
-    if(e.shiftKey){S.req=req.dataset.req;$('reqidFilter').value=req.dataset.req;rebuildFiltered();fullRender();toast(`Request: ${shortReq(req.dataset.req)}`);}
+    if(e.shiftKey){triClear(S.req);S.req[req.dataset.req]='include';refreshTri('req');rebuildFiltered();fullRender();toast(`Request: ${shortReq(req.dataset.req)}`);}
     else{openTrace(req.dataset.req);}
     return;}
   const je=e.target.closest('.je');if(je){const i=+je.dataset.li;const ex=document.getElementById('jd-'+i);if(ex){ex.classList.toggle('v');je.textContent=ex.classList.contains('v')?'[-]':'[+]';}else{const l=S.lines[i];if(l){je.closest('.ll').insertAdjacentHTML('afterend',jsonDetailHtml(l));document.getElementById('jd-'+i).classList.add('v');je.textContent='[-]';}}return;}
@@ -1487,6 +1597,7 @@ updateHiddenBtn();
 updateHighlightBtn();
 loadPresets();
 renderPresetDropdown();
+refreshAllTri();
 connect();
 
 // ── Preset events ──
