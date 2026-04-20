@@ -1556,7 +1556,7 @@ let sto;$('searchInput').addEventListener('input',e=>{clearTimeout(sto);sto=setT
       refreshTri(name);rebuildFiltered();fullRender();
     });
   }
-  document.addEventListener('click',()=>closeAll());
+  document.addEventListener('click',e=>{if(!e.target.closest('.tri-filter'))closeAll();});
   document.addEventListener('keydown',e=>{if(e.key==='Escape')closeAll();});
 })();
 $('hideTrace').addEventListener('click',e=>{S.hideTrace=!S.hideTrace;e.target.classList.toggle('active',S.hideTrace);e.target.textContent=S.hideTrace?'Show TRACE':'Hide TRACE';rebuildFiltered();fullRender();});
@@ -1765,7 +1765,9 @@ const Palette = (() => {
       current[key] = e.target.value;
       apply(current); save(current);
     });
-    document.addEventListener('click', () => close());
+    // Use closest() so clicks on the native color picker dialog (which
+    // technically fire outside paletteWrap) don't snap the popover shut mid-drag.
+    document.addEventListener('click', e => { if (!e.target.closest('#paletteWrap')) close(); });
     document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
   }
   return { apply, get current() { return current; } };
@@ -1857,7 +1859,7 @@ const ShareView = (() => {
 if ($('shareBtn')) {
   $('shareBtn').addEventListener('click', e => { e.stopPropagation(); ShareView.toggle(); });
   $('sharePop').addEventListener('click', e => e.stopPropagation());
-  document.addEventListener('click', () => ShareView.close());
+  document.addEventListener('click', e => { if (!e.target.closest('#shareWrap')) ShareView.close(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') ShareView.close(); });
 }
 
