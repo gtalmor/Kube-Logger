@@ -43,16 +43,18 @@
   .ns-chip input[type=color]::-webkit-color-swatch { border:none; border-radius:2px; }
 
   /* Per-line namespace indicator:
-     - full-row background tint applied via background-image (gradient) so it
-       stacks ON TOP of any level-specific background-color (ERROR red etc.)
-       while leaving text fully readable
-     - 3px solid left stripe for a hard visual anchor */
-  .ll {
-    position:relative;
-    background-image: linear-gradient(var(--ns-bg,transparent), var(--ns-bg,transparent));
+     - Level color takes the whole row so ERROR / WARN stand out at a glance.
+     - Namespace identity is shown via a 5px left stripe (plus the top-bar
+       legend chips); we intentionally don't tint the row background for ns
+       so it can't overpower the level color.
+     - On non-ERROR/WARN rows we allow a very faint ns wash (6% alpha) for
+       visual grouping, but never on ERROR/FATAL/WARN. */
+  .ll { position:relative; }
+  .ll:not(.lERROR):not(.lFATAL):not(.lWARN) {
+    background-image: linear-gradient(var(--ns-bg-soft,transparent), var(--ns-bg-soft,transparent));
   }
   .ll .ll-ns-stripe {
-    position:absolute; left:0; top:0; bottom:0; width:3px;
+    position:absolute; left:0; top:0; bottom:0; width:5px;
     background:var(--ns-color,transparent);
     pointer-events:none;
   }
@@ -169,12 +171,13 @@
   .ll { padding:1px 20px; display:flex; border-bottom:1px solid transparent; white-space:pre-wrap; word-break:break-all; }
   .ll:hover { background-color:rgba(255,255,255,.03); }
   /* Level backgrounds derive from the palette vars via color-mix so the
-     palette popover can live-tint them without touching JS. */
+     palette popover can live-tint them without touching JS. ERROR / WARN
+     go stronger so they clearly dominate the row. */
   .ll.lERROR,.ll.lFATAL {
-    background-color: color-mix(in srgb, var(--error) 18%, transparent);
-    border-bottom-color: color-mix(in srgb, var(--error) 25%, transparent);
+    background-color: color-mix(in srgb, var(--error) 26%, transparent);
+    border-bottom-color: color-mix(in srgb, var(--error) 40%, transparent);
   }
-  .ll.lWARN { background-color: color-mix(in srgb, var(--warn) 14%, transparent); }
+  .ll.lWARN { background-color: color-mix(in srgb, var(--warn) 20%, transparent); }
   .ll.lHTTP { background-color: color-mix(in srgb, var(--info) 6%, transparent); }
   .ll.lTRACE { opacity:.45; } .ll.lTRACE:hover { opacity:.8; }
   .ll.h5 { background-color:rgba(248,81,73,.1); border-bottom-color:rgba(248,81,73,.2); }

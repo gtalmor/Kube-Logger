@@ -213,7 +213,7 @@ function lineHtml(l,q,prev){
   if(l.type==='http'&&l.status>=500)c+=' h5';else if(l.type==='http'&&l.status>=400)c+=' h4';
   if(l.level==='ERROR'||l.level==='FATAL'||l.isFlowError||l.isErrorDetail||l.flowState==='failed')c+=' fl';
   const nsColor=l.ns?ensureNsColor(l.ns):'';
-  const nsStyle=nsColor?` style="--ns-color:${nsColor};--ns-bg:${hexToRgba(nsColor,0.35)}"`:'';
+  const nsStyle=nsColor?` style="--ns-color:${nsColor};--ns-bg-soft:${hexToRgba(nsColor,0.08)}"`:'';
   const nsTitle=l.ns?` data-ns="${esc(l.ns)}"`:'';
   let h=`<div class="${c}"${nsStyle}${nsTitle} data-i="${l.idx}">`;
   if(l.ns)h+=`<span class="ll-ns-stripe" title="${esc(l.ns)}"></span>`;
@@ -1420,7 +1420,7 @@ function ensureNsColor(ns){
 
 function applyNsStyle(el,color){
   el.style.setProperty('--ns-color',color);
-  el.style.setProperty('--ns-bg',hexToRgba(color,0.35));
+  el.style.setProperty('--ns-bg-soft',hexToRgba(color,0.08));
 }
 
 function renderNsLegend(){
