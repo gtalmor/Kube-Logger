@@ -1189,7 +1189,7 @@ function connect(){
     return;
   }
   try{S.ws=new WebSocket(AGENT_URL);}catch{return setConn(false);}
-  S.ws.onopen=()=>setConn(true);
+  S.ws.onopen=()=>{setConn(true);send({action:'get-init'});};
   S.ws.onclose=()=>{setConn(false);setTimeout(connect,3000);};
   S.ws.onerror=()=>{};
   S.ws.onmessage=ev=>{
@@ -1198,10 +1198,12 @@ function connect(){
       // Relay-specific control messages
       case'relay-hello':
         $('cLabel').textContent=m.producerConnected?'Agent connected':'Waiting for agent…';
+        if(m.producerConnected)send({action:'get-init'});
         break;
       case'producer-ready':
         $('cLabel').textContent='Agent connected';
         toast('Agent connected');
+        send({action:'get-init'});
         break;
       case'producer-gone':
         $('cLabel').textContent='Agent disconnected';
@@ -1214,6 +1216,7 @@ function connect(){
           $('cLabel').textContent=m.auth.arn?m.auth.arn.split('/').pop():'Authenticated';
         }
         if(m.capturing)setCap(true,m.ns);
+        Drawer.onInit(m);
         break;
       case'capture-start':case'capture-state':
         setCap(true,m.ns);
@@ -1230,9 +1233,10 @@ function connect(){
         }
         renderNsLegend();
         $('lc').innerHTML='';$('lc').classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';
+        Drawer.onCaptureStart(m);
         break;
-      case'log':try{addLive(m.line,m.ns);}catch(e){console.error('addLive error:',e);}break;
-      case'cleared':clearState();break;
+      case'log':try{addLive(m.line,m.ns);}catch(e){console.error('addLive error:',e);}Drawer.onLog(m);break;
+      case'cleared':clearState();Drawer.onCleared();break;
       case'ns-added':{
         const arr=Array.isArray(m.ns)?m.ns:[m.ns];
         for(const n of arr){if(!n)continue;S.nsCapturing.add(n);S.nsSeen.add(n);ensureNsColor(n);}
@@ -1246,12 +1250,18 @@ function connect(){
         setCap(false);populateFilters();updateFlow();updateErrBanner();updateStats();renderNsLegend();
         if(m.n!==undefined)toast(`Captured ${m.n} lines`);
         if(S.errIdx.length)setTimeout(()=>{S.curErr=0;scrollTo(S.errIdx[0]);},500);
+        Drawer.onCaptureEnd(m);
         break;
       case'stderr':if(m.msg&&!m.msg.includes('Experimental'))toast((m.ns?`[${m.ns}] `:'')+m.msg.slice(0,80));break;
       case'error':toast('Error: '+(m.msg||'unknown'));break;
       case'auth-status':
         $('cLabel').textContent=(m.ok||m.authenticated)?(m.arn?m.arn.split('/').pop():'Auth OK'):'Not authed';
+        Drawer.onAuthStatus(m);
         break;
+      case'auth-progress':Drawer.onAuthProgress(m);break;
+      case'auth-result':Drawer.onAuthResult(m);break;
+      case'namespaces':Drawer.onNamespaces(m);break;
+      case'saved':toast('Saved: '+(m.fn||m.path||''));break;
     }
   };
 }
@@ -1494,3 +1504,332 @@ $('presetDel').addEventListener('click',()=>{
   if(!confirm(`Delete preset "${S.currentPreset}"?`))return;
   deletePreset(S.currentPreset);
 });
+
+// ── Setup drawer ─────────────────────────────────────────────────────
+// Contains the popup controls (profile picker, SSO login, namespace picker,
+// capture start/stop). Uses localStorage for persistence (no chrome.storage
+// in a plain web page). Sends WS actions back to the agent via the relay.
+const Drawer = (() => {
+  const PALETTE = ['#3fb950','#58a6ff','#d29922','#bc8cff','#39c5cf','#ff7b72','#79c0ff','#e6db74'];
+  const LS_KEY = 'kubelogger.drawer.v1';
+
+  let allProfiles = [];
+  let disabledProfiles = new Set();
+  let cachedNsList = [];
+  let selectedNs = new Set();
+  let lastProfile = '';
+  let authState = { ok:false, arn:null, err:null, expiresAt:null };
+  let authTicker = null;
+  let capturing = false;
+
+  function loadState() {
+    try {
+      const j = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+      disabledProfiles = new Set(j.disabledProfiles || []);
+      cachedNsList = Array.isArray(j.cachedNs) ? j.cachedNs : [];
+      selectedNs = new Set(j.selectedNs || []);
+      if (j.nsColors) for (const [ns,c] of Object.entries(j.nsColors)) S.nsColors[ns] = c;
+      lastProfile = j.lastProfile || '';
+    } catch {}
+  }
+  function saveState() {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify({
+        disabledProfiles: [...disabledProfiles],
+        cachedNs: cachedNsList,
+        selectedNs: [...selectedNs],
+        nsColors: S.nsColors,
+        lastProfile,
+      }));
+    } catch {}
+  }
+
+  function open() {
+    $('setupDrawer').classList.add('v');
+    $('setupBackdrop').classList.add('v');
+    $('setupDrawer').setAttribute('aria-hidden','false');
+  }
+  function close() {
+    $('setupDrawer').classList.remove('v');
+    $('setupBackdrop').classList.remove('v');
+    $('setupDrawer').setAttribute('aria-hidden','true');
+  }
+
+  // Shorten Example-specific profile names; leave others as-is.
+  function prettyProfileName(p) {
+    return p.replace('example-','').replace('-profile-a',' (Lab)').replace('-profile-b',' (Prod)');
+  }
+
+  function populateProfiles(profiles) {
+    if (profiles) allProfiles = profiles;
+    const sel = $('profile');
+    const previous = sel.value;
+    sel.innerHTML = '<option value="">Select profile…</option>';
+    for (const p of allProfiles) {
+      if (disabledProfiles.has(p)) continue;
+      const opt = document.createElement('option');
+      opt.value = p; opt.textContent = prettyProfileName(p);
+      sel.appendChild(opt);
+    }
+    const choose = (previous && !disabledProfiles.has(previous)) ? previous
+                 : (lastProfile && !disabledProfiles.has(lastProfile) && allProfiles.includes(lastProfile)) ? lastProfile : '';
+    if (choose) sel.value = choose;
+    renderProfilesPanel();
+  }
+
+  function renderProfilesPanel() {
+    const el = $('profilesPanel');
+    if (!allProfiles.length) { el.innerHTML = '<div class="sd-empty">No profiles in ~/.aws/config</div>'; return; }
+    let h = '';
+    for (const p of allProfiles) {
+      const enabled = !disabledProfiles.has(p);
+      h += `<div class="sd-item" data-profile="${esc(p)}">`
+        +  `<input type="checkbox" ${enabled?'checked':''} />`
+        +  `<span class="sd-name" title="${esc(p)}">${esc(p)}</span>`
+        +  `</div>`;
+    }
+    el.innerHTML = h;
+  }
+
+  // Assign a color from PALETTE to a namespace and persist it. Shared with
+  // the viewer's S.nsColors so the log legend and drawer stay in sync.
+  function ensureColor(ns) {
+    if (S.nsColors[ns]) return S.nsColors[ns];
+    const used = new Set(Object.values(S.nsColors));
+    const c = PALETTE.find(p => !used.has(p)) || PALETTE[Object.keys(S.nsColors).length % PALETTE.length];
+    S.nsColors[ns] = c;
+    return c;
+  }
+
+  function renderNsList() {
+    const el = $('nsList');
+    if (!cachedNsList.length) { el.innerHTML = '<div class="sd-empty">Load namespaces first</div>'; renderSelectedSummary(); return; }
+    const filter = $('nsFilter').value.toLowerCase();
+    const priority = cachedNsList.filter(n => n.includes('io') || n.includes('productpod'));
+    const rest = cachedNsList.filter(n => !priority.includes(n));
+    const ordered = [...priority, ...rest];
+    const filtered = filter ? ordered.filter(n => n.toLowerCase().includes(filter)) : ordered;
+    if (!filtered.length) { el.innerHTML = '<div class="sd-empty">No matches</div>'; renderSelectedSummary(); return; }
+    filtered.sort((a,b) => (selectedNs.has(b)?1:0) - (selectedNs.has(a)?1:0));
+    let h = '';
+    for (const ns of filtered) {
+      const checked = selectedNs.has(ns);
+      const color = checked ? ensureColor(ns) : (S.nsColors[ns] || '#30363d');
+      h += `<div class="sd-item" data-ns="${esc(ns)}">`
+        +  `<input type="checkbox" ${checked?'checked':''} />`
+        +  `<span class="sd-name" title="${esc(ns)}">${esc(ns)}</span>`
+        +  (checked ? `<input type="color" value="${color}" title="Color for ${esc(ns)}" />` : '')
+        +  `</div>`;
+    }
+    el.innerHTML = h;
+    renderSelectedSummary();
+  }
+
+  function renderSelectedSummary() {
+    const el = $('nsSelectedSummary');
+    if (!selectedNs.size) { el.innerHTML = '<span>None selected</span>'; return; }
+    let h = '';
+    for (const ns of selectedNs) {
+      const c = S.nsColors[ns] || '#30363d';
+      h += `<span class="sd-chip"><span class="sd-chip-dot" style="background:${c}"></span>${esc(ns)}</span>`;
+    }
+    el.innerHTML = h;
+  }
+
+  function fmtRemaining(ms) {
+    if (ms <= 0) return 'expired';
+    const tm = Math.floor(ms / 60000);
+    if (tm < 60) return `${tm}m left`;
+    return `${Math.floor(tm/60)}h ${tm%60}m left`;
+  }
+
+  function renderAuthStatus() {
+    const dot = $('authDot'); const info = $('authInfo');
+    if (!authState.ok) { dot.className = 'dot fail'; info.textContent = authState.err || 'Not authenticated'; return; }
+    const label = authState.arn ? authState.arn.split('/').pop() : 'Authenticated';
+    if (!authState.expiresAt) { dot.className = 'dot ok'; info.textContent = label; return; }
+    const ms = authState.expiresAt - Date.now();
+    info.textContent = `${label} — ${fmtRemaining(ms)}`;
+    if (ms <= 0) dot.className = 'dot fail';
+    else if (ms < 10*60*1000) dot.className = 'dot pending';
+    else dot.className = 'dot ok';
+  }
+
+  function setAuth(ok, arn, err, expiresAt) {
+    authState = { ok, arn: arn||null, err: err||null, expiresAt: expiresAt||null };
+    if (ok) $('loadNs').disabled = false;
+    renderAuthStatus();
+    if (authTicker) { clearInterval(authTicker); authTicker = null; }
+    if (ok && authState.expiresAt) authTicker = setInterval(renderAuthStatus, 30000);
+    updateStartBtn();
+  }
+
+  function setCaptureState(active) {
+    capturing = active;
+    $('startBtn').style.display = active ? 'none' : '';
+    $('stopBtn').style.display = active ? '' : 'none';
+    updateStartBtn();
+  }
+
+  function updateStartBtn() {
+    $('startBtn').disabled = !selectedNs.size || !authState.ok || capturing;
+  }
+
+  // Public API called from the onmessage switch in connect().
+  return {
+    init() {
+      loadState();
+      renderNsList();
+      renderSelectedSummary();
+      renderAuthStatus();
+      updateStartBtn();
+
+      $('setupBtn').addEventListener('click', open);
+      $('sdClose').addEventListener('click', close);
+      $('setupBackdrop').addEventListener('click', close);
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && $('setupDrawer').classList.contains('v')) close();
+      });
+
+      $('profile').addEventListener('change', e => {
+        const p = e.target.value;
+        if (!p) return;
+        lastProfile = p; saveState();
+        send({ action: 'check-auth', profile: p });
+        $('authDot').className = 'dot pending';
+        $('authInfo').textContent = 'Checking…';
+      });
+
+      $('checkBtn').addEventListener('click', () => {
+        const p = $('profile').value;
+        if (!p) { $('authInfo').textContent = 'Select a profile first'; return; }
+        send({ action: 'check-auth', profile: p });
+        $('authDot').className = 'dot pending';
+        $('authInfo').textContent = 'Checking…';
+      });
+
+      $('loginBtn').addEventListener('click', () => {
+        const p = $('profile').value;
+        if (!p) { $('authInfo').textContent = 'Select a profile first'; return; }
+        send({ action: 'login', profile: p });
+        $('authDot').className = 'dot pending';
+        $('authInfo').textContent = 'Opening SSO on agent machine…';
+      });
+
+      $('loadNs').addEventListener('click', () => {
+        send({ action: 'namespaces' });
+        $('nsList').innerHTML = '<div class="sd-empty">Loading…</div>';
+      });
+
+      $('nsFilter').addEventListener('input', () => renderNsList());
+
+      $('nsList').addEventListener('change', e => {
+        const item = e.target.closest('.sd-item'); if (!item) return;
+        const ns = item.dataset.ns;
+        if (e.target.type === 'checkbox') {
+          if (e.target.checked) { selectedNs.add(ns); ensureColor(ns); }
+          else selectedNs.delete(ns);
+          saveState();
+          // Live add/remove while capturing so the user can iterate without a restart.
+          if (capturing) send({ action: e.target.checked ? 'add-ns' : 'remove-ns', ns: [ns] });
+          renderNsList(); updateStartBtn();
+        } else if (e.target.type === 'color') {
+          S.nsColors[ns] = e.target.value; saveState();
+          renderSelectedSummary();
+          if (typeof renderNsLegend === 'function') renderNsLegend();
+        }
+      });
+
+      $('nsList').addEventListener('click', e => {
+        if (e.target.tagName === 'INPUT') return;
+        const item = e.target.closest('.sd-item'); if (!item) return;
+        const cb = item.querySelector('input[type=checkbox]');
+        if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+      });
+
+      $('startBtn').addEventListener('click', () => {
+        const ns = [...selectedNs];
+        if (!ns.length) return;
+        send({ action: 'start', ns });
+        close();
+      });
+      $('stopBtn').addEventListener('click', () => send({ action: 'stop' }));
+
+      $('profilesManage').addEventListener('click', () => {
+        const el = $('profilesPanel');
+        el.style.display = el.style.display === 'none' ? '' : 'none';
+      });
+      $('profilesPanel').addEventListener('change', e => {
+        const item = e.target.closest('.sd-item');
+        if (!item || e.target.type !== 'checkbox') return;
+        const name = item.dataset.profile;
+        if (e.target.checked) disabledProfiles.delete(name);
+        else disabledProfiles.add(name);
+        saveState(); populateProfiles();
+      });
+      $('profilesPanel').addEventListener('click', e => {
+        if (e.target.tagName === 'INPUT') return;
+        const item = e.target.closest('.sd-item'); if (!item) return;
+        const cb = item.querySelector('input[type=checkbox]');
+        if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change', { bubbles: true })); }
+      });
+    },
+
+    onInit(m) {
+      if (Array.isArray(m.profiles)) populateProfiles(m.profiles);
+      if (m.auth) setAuth(m.auth.ok || m.auth.authenticated, m.auth.arn, m.auth.err, m.auth.expiresAt);
+      if (m.capturing) {
+        setCaptureState(true);
+        if (Array.isArray(m.ns)) {
+          selectedNs = new Set(m.ns);
+          for (const n of selectedNs) ensureColor(n);
+          saveState();
+          renderNsList();
+        }
+      } else {
+        setCaptureState(false);
+      }
+      // If authed but we have no namespace list yet, pull it so the drawer's usable immediately.
+      if (authState.ok && !cachedNsList.length) send({ action: 'namespaces' });
+    },
+
+    onAuthStatus(m) { setAuth(m.ok || m.authenticated, m.arn, m.err || m.error, m.expiresAt); },
+    onAuthProgress(m) { $('authInfo').textContent = m.msg || m.message || ''; },
+    onAuthResult(m) {
+      $('authInfo').textContent = m.msg || m.message || '';
+      if (m.ok || m.success) $('loadNs').disabled = false;
+    },
+
+    onNamespaces(m) {
+      const list = m.list || m.namespaces || [];
+      cachedNsList = list;
+      if (list.length) saveState();
+      renderNsList();
+    },
+
+    onCaptureStart(m) {
+      setCaptureState(true);
+      const ns = Array.isArray(m.ns) ? m.ns
+               : (typeof m.ns === 'string' ? m.ns.split(',').map(s=>s.trim()).filter(Boolean) : []);
+      if (ns.length) {
+        selectedNs = new Set(ns);
+        for (const n of ns) ensureColor(n);
+        saveState(); renderNsList();
+      }
+      $('captureInfo').textContent = `Capturing ${ns.join(', ')}…`;
+    },
+    onCaptureEnd(m) {
+      setCaptureState(false);
+      if (m && m.n !== undefined) $('captureInfo').innerHTML = `Done: <span class="num">${m.n}</span> lines`;
+    },
+    onLog(m) {
+      if (capturing) $('captureInfo').innerHTML = `<span class="num">${(m.i ?? 0)+1}</span> lines captured`;
+    },
+    onCleared() {
+      setCaptureState(false);
+      $('captureInfo').textContent = '';
+    },
+  };
+})();
+
+Drawer.init();

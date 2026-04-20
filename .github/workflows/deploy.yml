@@ -26,7 +26,19 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Deploy via SSH
+      # Push the runner's checkout to the server instead of pulling from GitHub
+      # on the server — the server no longer needs a GitHub deploy key.
+      - name: Rsync to server
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          APP_DIR:  ${{ secrets.APP_DIR }}
+        run: |
+          rsync -az --delete \
+            --exclude=.git --exclude=node_modules --exclude=logs --exclude=.env \
+            ./ "$SSH_USER@$SSH_HOST:$APP_DIR/"
+
+      - name: Install deps and reload pm2
         env:
           SSH_USER: ${{ secrets.SSH_USER }}
           SSH_HOST: ${{ secrets.SSH_HOST }}
@@ -35,11 +47,8 @@ jobs:
           ssh "$SSH_USER@$SSH_HOST" bash -lc "'
             set -euo pipefail
             cd \"$APP_DIR\"
-            git fetch --all --prune
-            git reset --hard origin/main
             npm ci --omit=dev
             mkdir -p logs
-            # First run starts; subsequent runs reload in place.
             if pm2 describe logviewer >/dev/null 2>&1; then
               pm2 reload logviewer --update-env
             else

@@ -5,11 +5,36 @@
 
 const { WebSocketServer } = require('ws');
 const { spawn, exec, execSync } = require('child_process');
+const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
 const PORT = parseInt(process.env.PORT || '4040', 10);
+// Override the relay target with KUBE_LOGGER_RELAY=http://localhost:4040 (or
+// wss://...) when you want to point a local agent at a local relay for testing.
+const RELAY_HTTP_URL = (process.env.KUBE_LOGGER_RELAY || 'https://logviewer.gtalmor.com').replace(/\/+$/, '');
+const RELAY_WS_URL = RELAY_HTTP_URL.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
+const CONFIG_DIR = path.join(os.homedir(), '.kube-logger');
+const SESSION_FILE = path.join(CONFIG_DIR, 'session');
+
+// Read the persisted session id, or generate and persist a new one.
+// Keeping the id stable across restarts means teammates can bookmark their
+// viewer URL once; a missing/too-short file gets rewritten with a fresh id.
+function loadOrCreateSession() {
+  try {
+    const existing = fs.readFileSync(SESSION_FILE, 'utf8').trim();
+    if (existing.length >= 16) return existing;
+  } catch {}
+  const id = crypto.randomBytes(16).toString('hex');
+  try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(SESSION_FILE, id + '\n', { mode: 0o600 });
+  } catch (e) {
+    console.error(`[session] could not persist to ${SESSION_FILE}: ${e.message}`);
+  }
+  return id;
+}
 
 // ── Config ──────────────────────────────────────────────────────────
 // Fallback cluster mapping used when `aws eks update-kubeconfig` runs after
@@ -89,13 +114,7 @@ function connectSaas() {
   ws.on('open', () => {
     console.log(`[saas] connected (session ${session.slice(0, 8)}…)`);
     // Send a snapshot so late-joining viewers know we're live and capturing state.
-    ws.send(JSON.stringify({
-      type: 'init',
-      auth: authCache,
-      capturing: !!capture,
-      tool: LOG_TOOL,
-      ns: capture ? capture.nsList : null,
-    }));
+    ws.send(JSON.stringify(buildInitMessage()));
     if (capture) {
       ws.send(JSON.stringify({
         type: 'capture-state',
@@ -106,6 +125,17 @@ function connectSaas() {
         ws.send(JSON.stringify({ type: 'log', line, ns, i }));
       }
     }
+  });
+
+  // Consumer → producer messages, forwarded by the relay, arrive here. Dispatch
+  // them through the same action handler the local extension uses, so the web
+  // viewer can drive auth / namespaces / capture on its own.
+  ws.on('message', async raw => {
+    const send = m => { try { if (ws.readyState === 1) ws.send(JSON.stringify(m)); } catch {} };
+    try {
+      const msg = JSON.parse(raw.toString());
+      await handleAction(msg, send);
+    } catch (e) { send({ type: 'error', msg: e.message }); }
   });
 
   ws.on('close', (code, reason) => {
@@ -165,26 +195,97 @@ function checkAuth(profile, force) {
   });
 }
 
-function doLogin(profile, ws) {
+function doLogin(profile, send) {
   const cluster = CLUSTERS[profile];
   const proc = spawn('aws', ['sso', 'login', '--profile', profile], { stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '';
   proc.stdout.on('data', d => out += d);
   proc.stderr.on('data', d => out += d);
   proc.on('close', code => {
-    if (code !== 0) return ws.send(JSON.stringify({ type: 'auth-result', ok: false, msg: `SSO failed: ${out.slice(0, 200)}` }));
-    if (!cluster) return ws.send(JSON.stringify({ type: 'auth-result', ok: true, msg: 'SSO OK — no cluster mapping, set kubeconfig manually' }));
+    if (code !== 0) return send({ type: 'auth-result', ok: false, msg: `SSO failed: ${out.slice(0, 200)}` });
+    if (!cluster) return send({ type: 'auth-result', ok: true, msg: 'SSO OK — no cluster mapping, set kubeconfig manually' });
     try {
       execSync(`aws eks update-kubeconfig --name ${cluster} --region us-east-1`, {
         env: { ...process.env, AWS_DEFAULT_PROFILE: profile, AWS_REGION: 'us-east-1' }, timeout: 15000
       });
       authCache = { ts: Date.now(), profile, ok: true, cluster };
       broadcast({ type: 'auth-status', ...authCache });
-      ws.send(JSON.stringify({ type: 'auth-result', ok: true, msg: `Connected to ${cluster}` }));
+      send({ type: 'auth-result', ok: true, msg: `Connected to ${cluster}` });
     } catch (e) {
-      ws.send(JSON.stringify({ type: 'auth-result', ok: true, msg: `SSO OK, kubeconfig failed: ${e.message.slice(0, 100)}` }));
+      send({ type: 'auth-result', ok: true, msg: `SSO OK, kubeconfig failed: ${e.message.slice(0, 100)}` });
     }
   });
+}
+
+function buildInitMessage() {
+  return {
+    type: 'init',
+    auth: authCache,
+    capturing: !!capture,
+    tool: LOG_TOOL,
+    profiles: discoverProfiles(),
+    ns: capture ? capture.nsList : null,
+    saas: saasTarget ? { url: saasTarget.url, session: saasTarget.session, connected: !!(saasProducer && saasProducer.readyState === 1) } : null,
+  };
+}
+
+// Dispatches a client action (from either the local extension or a web viewer
+// via the SaaS relay). `send` replies only to the requester; broadcast() is
+// used when all connected clients should see the state change.
+async function handleAction(msg, send) {
+  switch (msg.action) {
+    case 'check-auth':
+      send({ type: 'auth-status', ...(await checkAuth(msg.profile)) });
+      break;
+    case 'login':
+      send({ type: 'auth-progress', msg: 'Opening browser for SSO...' });
+      doLogin(msg.profile, send);
+      break;
+    case 'namespaces':
+      exec('kubectl get namespaces -o jsonpath="{.items[*].metadata.name}"', { timeout: 10000 }, (e, o) => {
+        send({ type: 'namespaces', list: e ? [] : o.replace(/"/g, '').split(/\s+/).filter(Boolean).sort() });
+      });
+      break;
+    case 'saas-connect':
+      setSaasTarget(msg.url, msg.session);
+      send({ type: 'saas-status', connected: !!saasTarget, url: saasTarget && saasTarget.url, session: saasTarget && saasTarget.session });
+      break;
+    case 'saas-disconnect':
+      clearSaasTarget();
+      send({ type: 'saas-status', connected: false });
+      break;
+    case 'get-init':
+      send(buildInitMessage());
+      break;
+    case 'start':
+      startCapture(msg.ns);
+      break;
+    case 'add-ns':
+      addNamespaces(msg.ns);
+      break;
+    case 'remove-ns':
+      removeNamespaces(msg.ns);
+      break;
+    case 'stop': {
+      const r = stopCapture();
+      broadcast({ type: 'capture-stop', ...r });
+      break;
+    }
+    case 'save': {
+      const items = msg.lines || (capture ? capture.lines : []);
+      const fn = `logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+      const fp = path.join(os.homedir(), 'Downloads', fn);
+      const text = items.map(l => typeof l === 'string' ? l : `[${l.ns || '?'}] ${l.line}`).join('\n');
+      fs.writeFileSync(fp, text, 'utf8');
+      send({ type: 'saved', path: fp, fn });
+      break;
+    }
+    case 'clear': {
+      if (capture) stopCapture();
+      broadcast({ type: 'cleared' });
+      break;
+    }
+  }
 }
 
 function spawnStream(ns, env) {
@@ -316,85 +417,36 @@ function stopCapture() {
 const wss = new WebSocketServer({ port: PORT });
 
 wss.on('connection', ws => {
+  const send = m => { try { if (ws.readyState === 1) ws.send(JSON.stringify(m)); } catch {} };
+
   // Send init state
-  ws.send(JSON.stringify({
-    type: 'init',
-    auth: authCache,
-    capturing: !!capture,
-    tool: LOG_TOOL,
-    profiles: discoverProfiles(),
-    ns: capture ? capture.nsList : null,
-    saas: saasTarget ? { url: saasTarget.url, session: saasTarget.session, connected: !!(saasProducer && saasProducer.readyState === 1) } : null,
-  }));
+  send(buildInitMessage());
 
   // If capturing, replay buffered lines
   if (capture) {
-    ws.send(JSON.stringify({ type: 'capture-state', ns: capture.nsList, start: capture.start, n: capture.lines.length }));
+    send({ type: 'capture-state', ns: capture.nsList, start: capture.start, n: capture.lines.length });
     for (let i = 0; i < capture.lines.length; i++) {
       const { line, ns } = capture.lines[i];
-      ws.send(JSON.stringify({ type: 'log', line, ns, i }));
+      send({ type: 'log', line, ns, i });
     }
   }
 
   ws.on('message', async raw => {
     try {
       const msg = JSON.parse(raw.toString());
-      switch (msg.action) {
-        case 'check-auth':
-          ws.send(JSON.stringify({ type: 'auth-status', ...(await checkAuth(msg.profile)) }));
-          break;
-        case 'login':
-          ws.send(JSON.stringify({ type: 'auth-progress', msg: 'Opening browser for SSO...' }));
-          doLogin(msg.profile, ws);
-          break;
-        case 'namespaces':
-          exec('kubectl get namespaces -o jsonpath="{.items[*].metadata.name}"', { timeout: 10000 }, (e, o) => {
-            ws.send(JSON.stringify({ type: 'namespaces', list: e ? [] : o.replace(/"/g, '').split(/\s+/).filter(Boolean).sort() }));
-          });
-          break;
-        case 'saas-connect':
-          setSaasTarget(msg.url, msg.session);
-          ws.send(JSON.stringify({ type: 'saas-status', connected: !!saasTarget, url: saasTarget && saasTarget.url, session: saasTarget && saasTarget.session }));
-          break;
-        case 'saas-disconnect':
-          clearSaasTarget();
-          ws.send(JSON.stringify({ type: 'saas-status', connected: false }));
-          break;
-        case 'start':
-          startCapture(msg.ns);
-          break;
-        case 'add-ns':
-          addNamespaces(msg.ns);
-          break;
-        case 'remove-ns':
-          removeNamespaces(msg.ns);
-          break;
-        case 'stop':
-          const r = stopCapture();
-          broadcast({ type: 'capture-stop', ...r });
-          break;
-        case 'save': {
-          const items = msg.lines || (capture ? capture.lines : []);
-          const fn = `logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
-          const fp = path.join(os.homedir(), 'Downloads', fn);
-          const text = items.map(l => typeof l === 'string' ? l : `[${l.ns || '?'}] ${l.line}`).join('\n');
-          fs.writeFileSync(fp, text, 'utf8');
-          ws.send(JSON.stringify({ type: 'saved', path: fp, fn }));
-          break;
-        }
-        case 'clear': {
-          const hadCapture = !!capture;
-          if (hadCapture) stopCapture();
-          broadcast({ type: 'cleared' });
-          break;
-        }
-      }
-    } catch (e) { ws.send(JSON.stringify({ type: 'error', msg: e.message })); }
+      await handleAction(msg, send);
+    } catch (e) { send({ type: 'error', msg: e.message }); }
   });
 });
 
+const SESSION_ID = loadOrCreateSession();
+const VIEWER_URL = `${RELAY_HTTP_URL}/?session=${SESSION_ID}`;
+
 console.log(`\n  Kube Logger Agent on ws://localhost:${PORT}  [build:ns-multi-v1]`);
-console.log(`  Tool: ${LOG_TOOL} | Profiles: ${Object.keys(CLUSTERS).join(', ')}\n`);
+console.log(`  Tool: ${LOG_TOOL} | Profiles: ${Object.keys(CLUSTERS).join(', ')}`);
+console.log(`  Viewer: ${VIEWER_URL}\n`);
+
+setSaasTarget(RELAY_WS_URL, SESSION_ID);
 
 // Periodic AWS auth re-check. Every 60s force a fresh check and broadcast
 // updated auth-status (including SSO expiresAt) to all clients, so popup +

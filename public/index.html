@@ -295,6 +295,64 @@
 
   ::-webkit-scrollbar { width:7px; } ::-webkit-scrollbar-track { background:var(--bg); } ::-webkit-scrollbar-thumb { background:var(--bg3); border-radius:4px; } ::-webkit-scrollbar-thumb:hover { background:var(--border); }
   @media(max-width:800px) { .lp,.lr { display:none; } }
+
+  /* ── Setup drawer ── */
+  .btn.setup-btn { font-size:11px; padding:4px 10px; }
+  .setup-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; z-index:90; }
+  .setup-backdrop.v { display:block; }
+  .setup-drawer {
+    position:fixed; top:0; right:0; bottom:0; width:340px;
+    background:var(--bg); border-left:1px solid var(--border);
+    z-index:100; display:flex; flex-direction:column;
+    transform:translateX(100%); transition:transform .2s ease;
+    overflow-y:auto;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+    font-size:12px;
+  }
+  .setup-drawer.v { transform:translateX(0); }
+  .sd-header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:12px 14px; border-bottom:1px solid var(--border);
+    background:var(--bg2); position:sticky; top:0; z-index:1;
+  }
+  .sd-header .sd-title { font-size:13px; font-weight:600; color:var(--bright); }
+  .sd-header .sd-close {
+    background:transparent; border:1px solid var(--border); color:var(--muted);
+    padding:0 8px; font-size:16px; line-height:20px; border-radius:4px; cursor:pointer;
+  }
+  .sd-header .sd-close:hover { border-color:var(--accent); color:var(--accent); }
+  .sd-section { padding:10px 14px; border-bottom:1px solid var(--border); }
+  .sd-label {
+    font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px;
+    margin-bottom:6px; display:flex; align-items:center; justify-content:space-between;
+  }
+  .sd-action { cursor:pointer; color:var(--muted); text-transform:none; letter-spacing:0; font-size:11px; padding:0 4px; }
+  .sd-action:hover { color:var(--accent); }
+  .setup-drawer select, .setup-drawer .btn, .setup-drawer input[type=text] {
+    width:100%; background:var(--bg3); border:1px solid var(--border);
+    color:var(--text); font-family:inherit; font-size:12px;
+    padding:6px 10px; border-radius:5px; cursor:pointer; outline:none;
+  }
+  .setup-drawer .btn.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
+  .setup-drawer .btn.primary:hover { background:#79b8ff; }
+  .setup-drawer .btn.recording { background:var(--error); color:white; border-color:var(--error); animation:rec 1.5s infinite; }
+  .setup-drawer .btn:disabled { opacity:.35; cursor:not-allowed; }
+  .sd-row { display:flex; gap:6px; margin-top:4px; }
+  .sd-row > * { flex:1; min-width:0; }
+  .sd-status-row { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); margin-top:6px; }
+  .sd-capture-info { margin-top:6px; font-size:11px; color:var(--muted); }
+  .sd-capture-info .num { color:var(--accent); font-weight:600; }
+  .sd-list { margin-top:6px; max-height:200px; overflow-y:auto; border:1px solid var(--border); border-radius:5px; background:var(--bg3); }
+  .sd-item { display:flex; align-items:center; gap:6px; padding:4px 8px; border-bottom:1px solid var(--border); font-size:11px; }
+  .sd-item:last-child { border-bottom:none; }
+  .sd-item:hover { background:rgba(255,255,255,.04); }
+  .sd-item input[type=checkbox] { flex-shrink:0; margin:0; cursor:pointer; }
+  .sd-item .sd-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
+  .sd-item input[type=color] { width:22px; height:18px; border:1px solid var(--border); border-radius:3px; padding:0; background:transparent; cursor:pointer; flex-shrink:0; }
+  .sd-empty { padding:16px 8px; text-align:center; color:var(--muted); font-size:11px; }
+  .sd-selected { font-size:10px; color:var(--muted); margin-top:6px; min-height:14px; }
+  .sd-chip { display:inline-flex; align-items:center; gap:4px; background:var(--bg3); border:1px solid var(--border); border-radius:3px; padding:1px 5px; margin-right:4px; margin-top:2px; }
+  .sd-chip-dot { width:8px; height:8px; border-radius:2px; display:inline-block; }
 </style>
 </head>
 <body>
@@ -304,6 +362,7 @@
   <span class="dot" id="cDot"></span>
   <h1>Kube Logger</h1>
   <span class="status-text" id="cLabel">Connecting...</span>
+  <button class="btn setup-btn" id="setupBtn" title="Configure profile, namespaces, and start capture">⚙ Setup</button>
   <button class="btn" id="clearBtn" style="display:none">Clear</button>
   <span id="buildTag" style="font-size:9px;color:var(--muted);opacity:0.6;letter-spacing:0.5px">build:saas-v1 - 4/20</span>
   <div class="ns-legend" id="nsLegend"></div>
@@ -345,7 +404,7 @@
 <!-- Welcome -->
 <div class="welcome" id="welcome">
   <h2>Waiting for logs</h2>
-  <p>Start a capture from the extension popup, or drop a log file below.</p>
+  <p>Click ⚙ Setup to pick a profile and namespaces, or drop a log file below.</p>
   <div class="dz" id="dz">Drop log file here</div>
 </div>
 
@@ -375,6 +434,50 @@
   </div>
   <div class="tp-body" id="tpBody"></div>
 </div>
+
+<!-- Setup drawer (profile + namespaces + capture controls) -->
+<div class="setup-backdrop" id="setupBackdrop"></div>
+<aside class="setup-drawer" id="setupDrawer" aria-hidden="true">
+  <div class="sd-header">
+    <span class="sd-title">Setup</span>
+    <button class="sd-close" id="sdClose" title="Close">&times;</button>
+  </div>
+
+  <div class="sd-section">
+    <div class="sd-label">
+      <span>AWS Auth</span>
+      <span class="sd-action" id="profilesManage" title="Manage which profiles appear in the dropdown">Manage</span>
+    </div>
+    <select id="profile"><option value="">Select profile…</option></select>
+    <div class="sd-list" id="profilesPanel" style="display:none"></div>
+    <div class="sd-row">
+      <button class="btn" id="checkBtn">Check</button>
+      <button class="btn" id="loginBtn">SSO Login</button>
+    </div>
+    <div class="sd-status-row">
+      <span class="dot" id="authDot"></span>
+      <span id="authInfo">Not checked</span>
+    </div>
+  </div>
+
+  <div class="sd-section">
+    <div class="sd-label">Namespaces</div>
+    <div class="sd-row">
+      <input type="text" id="nsFilter" placeholder="Filter…" />
+      <button class="btn" id="loadNs" disabled>Load</button>
+    </div>
+    <div class="sd-list" id="nsList">
+      <div class="sd-empty">Load namespaces first</div>
+    </div>
+    <div class="sd-selected" id="nsSelectedSummary"></div>
+  </div>
+
+  <div class="sd-section">
+    <button class="btn primary" id="startBtn" disabled>Start Capture</button>
+    <button class="btn recording" id="stopBtn" style="display:none">Stop Capture</button>
+    <div class="sd-capture-info" id="captureInfo"></div>
+  </div>
+</aside>
 
 <script src="viewer.js"></script>
 </body>
