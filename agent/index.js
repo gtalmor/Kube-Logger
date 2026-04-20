@@ -466,6 +466,57 @@ console.log(`  Viewer: ${VIEWER_URL}\n`);
 
 setSaasTarget(RELAY_WS_URL, SESSION_ID);
 
+// Hit the GitHub Releases API once at boot and print a banner if a newer
+// kube-logger-agent is available. Fire-and-forget, 3s timeout, silent on
+// any error. Set KUBE_LOGGER_NO_UPDATE_CHECK=1 to skip (daemonized runs).
+function checkForUpdate() {
+  if (process.env.KUBE_LOGGER_NO_UPDATE_CHECK) return;
+  const https = require('https');
+  const req = https.get({
+    host: 'api.github.com',
+    path: '/repos/gtalmor/Kube-Logger/releases/latest',
+    headers: {
+      'User-Agent': `kube-logger-agent/${VERSION}`,
+      Accept: 'application/vnd.github+json',
+    },
+    timeout: 3000,
+  }, res => {
+    if (res.statusCode !== 200) { res.resume(); return; }
+    let body = '';
+    res.on('data', c => body += c);
+    res.on('end', () => {
+      try {
+        const tag = JSON.parse(body).tag_name;
+        if (!tag) return;
+        const latest = tag.replace(/^v/, '');
+        if (!isNewerVersion(latest, VERSION)) return;
+        const bar = '─'.repeat(64);
+        console.error(`\n  ${bar}`);
+        console.error(`  A newer kube-logger-agent is available: v${latest} (you're on v${VERSION})`);
+        console.error(`  Upgrade:  brew upgrade kube-logger-agent`);
+        console.error(`  Notes:    https://github.com/gtalmor/Kube-Logger/releases/tag/${tag}`);
+        console.error(`  ${bar}\n`);
+      } catch {}
+    });
+  });
+  req.on('error', () => {});
+  req.on('timeout', () => req.destroy());
+}
+
+// Tiny semver-ish comparator — parts beyond what both have default to 0.
+function isNewerVersion(a, b) {
+  const pa = a.split('.').map(n => parseInt(n, 10) || 0);
+  const pb = b.split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x > y) return true;
+    if (x < y) return false;
+  }
+  return false;
+}
+
+checkForUpdate();
+
 // Open the viewer in the user's default browser. Most OS openers focus an
 // existing tab if one is already on the same URL, so restarts don't spam
 // duplicate tabs. Set KUBE_LOGGER_NO_BROWSER=1 to skip (useful for headless
