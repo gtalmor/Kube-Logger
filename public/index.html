@@ -168,8 +168,14 @@
      wipe out the ns tint gradient (.ll { background-image: ... }) that layers on top. */
   .ll { padding:1px 20px; display:flex; border-bottom:1px solid transparent; white-space:pre-wrap; word-break:break-all; }
   .ll:hover { background-color:rgba(255,255,255,.03); }
-  .ll.lERROR,.ll.lFATAL { background-color:rgba(248,81,73,.06); border-bottom-color:rgba(248,81,73,.1); }
-  .ll.lWARN { background-color:rgba(210,153,34,.06); }
+  /* Level backgrounds derive from the palette vars via color-mix so the
+     palette popover can live-tint them without touching JS. */
+  .ll.lERROR,.ll.lFATAL {
+    background-color: color-mix(in srgb, var(--error) 18%, transparent);
+    border-bottom-color: color-mix(in srgb, var(--error) 25%, transparent);
+  }
+  .ll.lWARN { background-color: color-mix(in srgb, var(--warn) 14%, transparent); }
+  .ll.lHTTP { background-color: color-mix(in srgb, var(--info) 6%, transparent); }
   .ll.lTRACE { opacity:.45; } .ll.lTRACE:hover { opacity:.8; }
   .ll.h5 { background-color:rgba(248,81,73,.1); border-bottom-color:rgba(248,81,73,.2); }
   .ll.h4 { background-color:rgba(210,153,34,.06); }
@@ -353,6 +359,24 @@
   .tri-count { color:var(--muted); font-size:10px; margin-left:4px; flex-shrink:0; }
   .tri-empty { padding:12px 8px; text-align:center; color:var(--muted); font-size:11px; }
 
+  /* ── Palette popover (per-level colors) ── */
+  .palette-wrap { position:relative; display:inline-block; }
+  .palette-pop {
+    display:none; position:absolute; top:calc(100% + 4px); right:0;
+    background:var(--bg2); border:1px solid var(--border); border-radius:6px;
+    padding:8px; min-width:240px; z-index:100;
+    box-shadow:0 4px 16px rgba(0,0,0,0.5);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+    font-size:12px;
+  }
+  .palette-pop.v { display:block; }
+  .pp-row { display:flex; align-items:center; gap:10px; padding:4px 6px; border-radius:4px; }
+  .pp-row:hover { background:var(--bg3); }
+  .pp-label { flex:1; font-size:11px; }
+  .pp-row input[type=color] { width:32px; height:22px; padding:0; border:1px solid var(--border); border-radius:4px; background:transparent; cursor:pointer; flex-shrink:0; }
+  .pp-hint { font-size:10px; color:var(--muted); padding:4px 6px; }
+  .pp-reset { margin-top:4px; width:100%; }
+
   /* ── Share-view popover ── */
   .share-wrap { position:relative; display:inline-block; }
   .share-pop {
@@ -453,6 +477,10 @@
   <div class="ns-legend" id="nsLegend"></div>
   <div class="stats" id="stats"></div>
   <span class="ro-banner" id="roBanner" style="display:none" title="You are viewing a read-only invite — you can't control the capture">read-only</span>
+  <div class="palette-wrap" id="paletteWrap">
+    <button class="btn setup-btn" id="paletteBtn" title="Customize level colors">🎨</button>
+    <div class="palette-pop" id="palettePop"></div>
+  </div>
   <div class="share-wrap" id="shareWrap">
     <button class="btn setup-btn" id="shareBtn" title="Generate a read-only invite link to share this view">⇱ Share</button>
     <div class="share-pop" id="sharePop"></div>

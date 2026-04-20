@@ -1703,6 +1703,74 @@ $('presetDel').addEventListener('click',()=>{
   deletePreset(S.currentPreset);
 });
 
+// ── Level color palette ─────────────────────────────────────────────
+// Writes user-picked colors into CSS custom properties on :root. The line
+// backgrounds use color-mix(in srgb, var(--error) 18%, transparent) so
+// changing --error live-tints every ERROR row without any JS walk.
+const Palette = (() => {
+  const LS_KEY = 'kubelogger.palette.v1';
+  const DEFAULTS = {
+    error: '#f85149',
+    warn:  '#d29922',
+    info:  '#58a6ff',
+    debug: '#8b949e',
+    trace: '#484f58',
+  };
+  const LABELS = { error:'ERROR / FATAL', warn:'WARN', info:'INFO / HTTP', debug:'DEBUG', trace:'TRACE' };
+
+  function load() {
+    try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(LS_KEY) || '{}') }; }
+    catch { return { ...DEFAULTS }; }
+  }
+  function save(c) { try { localStorage.setItem(LS_KEY, JSON.stringify(c)); } catch {} }
+  function apply(c) {
+    const r = document.documentElement.style;
+    r.setProperty('--error', c.error);
+    r.setProperty('--warn',  c.warn);
+    r.setProperty('--info',  c.info);
+    r.setProperty('--debug', c.debug);
+    r.setProperty('--trace', c.trace);
+  }
+
+  let current = load();
+  apply(current);
+
+  function render() {
+    const pop = $('palettePop'); if (!pop) return;
+    let h = '';
+    for (const key of Object.keys(DEFAULTS)) {
+      h += `<div class="pp-row">`
+        + `<span class="pp-label">${esc(LABELS[key])}</span>`
+        + `<input type="color" data-key="${esc(key)}" value="${esc(current[key])}" />`
+        + `</div>`;
+    }
+    h += `<div class="pp-hint">Level background tint is derived from these — warnings go yellowish, errors red, etc.</div>`;
+    h += `<button class="btn pp-reset" id="ppReset">Reset to defaults</button>`;
+    pop.innerHTML = h;
+  }
+
+  function open()  { render(); $('palettePop').classList.add('v'); }
+  function close() { $('palettePop').classList.remove('v'); }
+
+  if ($('paletteBtn')) {
+    $('paletteBtn').addEventListener('click', e => { e.stopPropagation();
+      $('palettePop').classList.contains('v') ? close() : open();
+    });
+    $('palettePop').addEventListener('click', e => {
+      e.stopPropagation();
+      if (e.target.id === 'ppReset') { current = { ...DEFAULTS }; save(current); apply(current); render(); return; }
+    });
+    $('palettePop').addEventListener('input', e => {
+      const key = e.target.dataset.key; if (!key) return;
+      current[key] = e.target.value;
+      apply(current); save(current);
+    });
+    document.addEventListener('click', () => close());
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+  }
+  return { apply, get current() { return current; } };
+})();
+
 // ── Read-only mode (invitee) ────────────────────────────────────────
 // When the relay marks the consumer as read-only (invitee with ?rotoken=…),
 // hide the Setup and Share controls and show a pill in the top bar. The
