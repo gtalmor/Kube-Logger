@@ -10,37 +10,37 @@ const AGENT_URL = (() => {
   return `${proto}//${location.host}/consumer?session=${encodeURIComponent(SESSION_ID)}`;
 })();
 
-// Stub the chrome.* APIs used by the shared viewer logic so calls are harmless
-// when running as a plain web page (not inside the extension).
-const chrome = (typeof window !== 'undefined' && window.chrome && window.chrome.storage)
-  ? window.chrome
-  : (() => {
-      const LS_PREFIX = 'chrome-shim:';
-      return {
-        storage: {
-          local: {
-            get(keys, cb) {
-              const out = {};
-              const arr = typeof keys === 'string' ? [keys]
-                : Array.isArray(keys) ? keys
-                : keys && typeof keys === 'object' ? Object.keys(keys)
-                : [];
-              for (const k of arr) {
-                const raw = localStorage.getItem(LS_PREFIX + k);
-                if (raw !== null) { try { out[k] = JSON.parse(raw); } catch {} }
-              }
-              (cb || (() => {}))(out);
-            },
-            set(obj, cb) {
-              for (const [k, v] of Object.entries(obj || {})) localStorage.setItem(LS_PREFIX + k, JSON.stringify(v));
-              (cb || (() => {}))();
-            },
-          },
-          onChanged: { addListener() {} },
+// localStorage-backed shim for the chrome.* APIs the legacy extension-shared
+// code calls. Named `_ext` (not `chrome`) because Chromium exposes `chrome` as
+// a non-shadowable global on regular pages — declaring `const chrome` there
+// throws "Identifier 'chrome' has already been declared" at parse time.
+const _ext = (() => {
+  const LS_PREFIX = 'chrome-shim:';
+  return {
+    storage: {
+      local: {
+        get(keys, cb) {
+          const out = {};
+          const arr = typeof keys === 'string' ? [keys]
+            : Array.isArray(keys) ? keys
+            : keys && typeof keys === 'object' ? Object.keys(keys)
+            : [];
+          for (const k of arr) {
+            const raw = localStorage.getItem(LS_PREFIX + k);
+            if (raw !== null) { try { out[k] = JSON.parse(raw); } catch {} }
+          }
+          (cb || (() => {}))(out);
         },
-        runtime: { sendMessage() {} },
-      };
-    })();
+        set(obj, cb) {
+          for (const [k, v] of Object.entries(obj || {})) localStorage.setItem(LS_PREFIX + k, JSON.stringify(v));
+          (cb || (() => {}))();
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+    runtime: { sendMessage() {} },
+  };
+})();
 // One-time migration from the old `io-*` localStorage keys.
 (function migrateStorageKeys(){
   const map = {
@@ -1267,7 +1267,7 @@ function connect(){
 }
 
 function send(m){if(S.ws&&S.ws.readyState===1)S.ws.send(JSON.stringify(m));}
-function badge(text,color){try{chrome.runtime.sendMessage({type:'badge',text,color});}catch{}}
+function badge(text,color){try{_ext.runtime.sendMessage({type:'badge',text,color});}catch{}}
 
 function setConn(ok){
   $('cDot').className='dot '+(ok?'ok':'fail');
@@ -1301,7 +1301,7 @@ function ensureNsColor(ns){
   const used=new Set(Object.values(S.nsColors));
   const c=palette.find(p=>!used.has(p))||palette[Object.keys(S.nsColors).length%palette.length];
   S.nsColors[ns]=c;
-  try{chrome.storage.local.set({nsColors:S.nsColors});}catch{}
+  try{_ext.storage.local.set({nsColors:S.nsColors});}catch{}
   return c;
 }
 
@@ -1331,7 +1331,7 @@ function renderNsLegend(){
 
 function applyNsColorChange(ns,color){
   S.nsColors[ns]=color;
-  try{chrome.storage.local.set({nsColors:S.nsColors});}catch{}
+  try{_ext.storage.local.set({nsColors:S.nsColors});}catch{}
   // Re-tint existing lines without full re-render
   $('lc').querySelectorAll(`.ll[data-ns="${CSS.escape(ns)}"]`).forEach(el=>applyNsStyle(el,color));
   renderNsLegend();
@@ -1344,7 +1344,7 @@ $('nsLegend').addEventListener('input',e=>{
 
 // Sync when popup (or another viewer tab) changes colors
 try{
-  chrome.storage.onChanged.addListener((changes,area)=>{
+  _ext.storage.onChanged.addListener((changes,area)=>{
     if(area!=='local')return;
     if(!changes.nsColors)return;
     const next=changes.nsColors.newValue||{};
@@ -1358,7 +1358,7 @@ try{
     }
     if(any)renderNsLegend();
   });
-  chrome.storage.local.get('nsColors',d=>{
+  _ext.storage.local.get('nsColors',d=>{
     if(!d||!d.nsColors)return;
     // Popup-stored colors are authoritative — override anything the viewer auto-assigned
     // and re-tint any lines that are already in the DOM.
