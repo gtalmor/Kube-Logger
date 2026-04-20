@@ -1,7 +1,7 @@
 {
   "name": "kube-logger",
   "version": "1.0.0",
-  "description": "Kube Logger SaaS — central relay + web viewer (server/, public/), per-user local agent (agent/), Chrome extension control panel (extension/).",
+  "description": "Kube Logger — central relay + web viewer (server/, public/) plus a per-user local agent (agent/) that streams Kubernetes logs over WebSocket.",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
