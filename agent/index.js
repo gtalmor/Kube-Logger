@@ -234,18 +234,27 @@ function doLogin(profile, send) {
   let out = '';
   proc.stdout.on('data', d => out += d);
   proc.stderr.on('data', d => out += d);
-  proc.on('close', code => {
-    if (code !== 0) return send({ type: 'auth-result', ok: false, msg: `SSO failed: ${out.slice(0, 200)}` });
-    if (!cluster) return send({ type: 'auth-result', ok: true, msg: `SSO OK — no cluster mapping for "${profile}", add it to ${CONFIG_FILE} or set kubeconfig manually` });
+  proc.on('close', async code => {
+    if (code !== 0) { broadcast({ type: 'auth-status', ok: false, profile, err: `SSO failed: ${out.slice(0, 200)}` }); return; }
+
+    // Always verify via `sts get-caller-identity` so authCache reflects the
+    // real authed state regardless of whether we also try to touch kubeconfig.
+    await checkAuth(profile, true);
+    broadcast({ type: 'auth-status', ...authCache });
+
+    if (!cluster) {
+      send({ type: 'auth-result', ok: true, msg: `No cluster mapping for "${profile}" — add it to ${CONFIG_FILE} or run \`aws eks update-kubeconfig\` manually.` });
+      return;
+    }
     try {
       execSync(`aws eks update-kubeconfig --name ${cluster} --region ${region}`, {
         env: { ...process.env, AWS_DEFAULT_PROFILE: profile, AWS_REGION: region }, timeout: 15000
       });
-      authCache = { ts: Date.now(), profile, ok: true, cluster };
+      authCache = { ...authCache, cluster };
       broadcast({ type: 'auth-status', ...authCache });
       send({ type: 'auth-result', ok: true, msg: `Connected to ${cluster}` });
     } catch (e) {
-      send({ type: 'auth-result', ok: true, msg: `SSO OK, kubeconfig failed: ${e.message.slice(0, 100)}` });
+      send({ type: 'auth-result', ok: true, msg: `kubeconfig update failed: ${e.message.slice(0, 120)}` });
     }
   });
 }

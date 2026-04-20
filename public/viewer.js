@@ -1904,6 +1904,14 @@ const Drawer = (() => {
     $('setupDrawer').classList.add('v');
     $('setupBackdrop').classList.add('v');
     $('setupDrawer').setAttribute('aria-hidden','false');
+    // Re-check auth every time the drawer opens — user's here, they want fresh
+    // state, and the check is cheap (sts get-caller-identity on their laptop).
+    const p = $('profile').value || lastProfile;
+    if (p) {
+      send({ action: 'check-auth', profile: p });
+      $('authDot').className = 'dot pending';
+      $('authInfo').textContent = 'Checking…';
+    }
   }
   function close() {
     $('setupDrawer').classList.remove('v');
@@ -2139,7 +2147,10 @@ const Drawer = (() => {
     onAuthStatus(m) { setAuth(m.ok || m.authenticated, m.arn, m.err || m.error, m.expiresAt); },
     onAuthProgress(m) { $('authInfo').textContent = m.msg || m.message || ''; },
     onAuthResult(m) {
-      $('authInfo').textContent = m.msg || m.message || '';
+      // Cluster-mapping / kubeconfig result is a separate concern from auth —
+      // surface it as a toast so it doesn't stomp on the auth line.
+      const msg = m.msg || m.message;
+      if (msg) toast(msg);
       if (m.ok || m.success) $('loadNs').disabled = false;
     },
 
