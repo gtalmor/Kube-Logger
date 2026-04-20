@@ -17,6 +17,7 @@ const RELAY_HTTP_URL = (process.env.KUBE_LOGGER_RELAY || 'https://logviewer.gtal
 const RELAY_WS_URL = RELAY_HTTP_URL.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
 const CONFIG_DIR = path.join(os.homedir(), '.kube-logger');
 const SESSION_FILE = path.join(CONFIG_DIR, 'session');
+const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 // Read the persisted session id, or generate and persist a new one.
 // Keeping the id stable across restarts means teammates can bookmark their
@@ -36,19 +37,39 @@ function loadOrCreateSession() {
   return id;
 }
 
-// ── Config ──────────────────────────────────────────────────────────
-// Fallback cluster mapping used when `aws eks update-kubeconfig` runs after
-// SSO login. Profiles not in this map still log in fine — their kubeconfig
-// just isn't touched automatically.
-const CLUSTERS = {
-  'example-profile-a': 'example-cluster-a',
-  'example-profile-b': 'example-cluster-b',
-};
+// ── User config (profile→cluster mapping, region, disabled profiles) ───
+// Edited by hand at ~/.kube-logger/config.json. Shape:
+//   { "region": "us-east-1",
+//     "clusters": { "<aws-profile>": "<eks-cluster-name>", ... },
+//     "disabledProfiles": ["profile-to-hide-from-drawer"] }
+// Changes take effect on agent restart.
+function loadAgentConfig() {
+  try {
+    const j = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    return {
+      region: j.region || 'us-east-1',
+      clusters: j.clusters || {},
+      disabledProfiles: new Set(j.disabledProfiles || []),
+    };
+  } catch {
+    const template = { region: 'us-east-1', clusters: {}, disabledProfiles: [] };
+    try {
+      fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(template, null, 2) + '\n', { mode: 0o600 });
+    } catch (e) {
+      console.error(`[config] could not write template to ${CONFIG_FILE}: ${e.message}`);
+    }
+    return { region: 'us-east-1', clusters: {}, disabledProfiles: new Set() };
+  }
+}
+const CFG = loadAgentConfig();
 
 function which(cmd) { try { execSync(`which ${cmd}`, { stdio: 'pipe' }); return true; } catch { return false; } }
 const LOG_TOOL = which('stern') ? 'stern' : which('kubelog') ? 'kubelog' : 'kubectl';
 
 // Discover profile names from ~/.aws/config. Handles `[default]`, `[profile X]`.
+// Profiles listed in CFG.disabledProfiles are filtered out so the drawer only
+// shows the ones the user cares about.
 function discoverProfiles() {
   const cfgPath = path.join(os.homedir(), '.aws/config');
   try {
@@ -61,8 +82,8 @@ function discoverProfiles() {
       if (section === 'default') names.push('default');
       else if (section.startsWith('profile ')) names.push(section.slice(8).trim());
     }
-    return [...new Set(names)].sort();
-  } catch { return Object.keys(CLUSTERS); /* fallback if ~/.aws/config not readable */ }
+    return [...new Set(names)].filter(n => !CFG.disabledProfiles.has(n)).sort();
+  } catch { return Object.keys(CFG.clusters).filter(n => !CFG.disabledProfiles.has(n)); }
 }
 
 // ── State ───────────────────────────────────────────────────────────
@@ -196,17 +217,18 @@ function checkAuth(profile, force) {
 }
 
 function doLogin(profile, send) {
-  const cluster = CLUSTERS[profile];
+  const cluster = CFG.clusters[profile];
+  const region = CFG.region;
   const proc = spawn('aws', ['sso', 'login', '--profile', profile], { stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '';
   proc.stdout.on('data', d => out += d);
   proc.stderr.on('data', d => out += d);
   proc.on('close', code => {
     if (code !== 0) return send({ type: 'auth-result', ok: false, msg: `SSO failed: ${out.slice(0, 200)}` });
-    if (!cluster) return send({ type: 'auth-result', ok: true, msg: 'SSO OK — no cluster mapping, set kubeconfig manually' });
+    if (!cluster) return send({ type: 'auth-result', ok: true, msg: `SSO OK — no cluster mapping for "${profile}", add it to ${CONFIG_FILE} or set kubeconfig manually` });
     try {
-      execSync(`aws eks update-kubeconfig --name ${cluster} --region us-east-1`, {
-        env: { ...process.env, AWS_DEFAULT_PROFILE: profile, AWS_REGION: 'us-east-1' }, timeout: 15000
+      execSync(`aws eks update-kubeconfig --name ${cluster} --region ${region}`, {
+        env: { ...process.env, AWS_DEFAULT_PROFILE: profile, AWS_REGION: region }, timeout: 15000
       });
       authCache = { ts: Date.now(), profile, ok: true, cluster };
       broadcast({ type: 'auth-status', ...authCache });
@@ -301,7 +323,7 @@ function attachStream(ns) {
   const env = { ...process.env };
   if (authCache && authCache.profile) {
     env.AWS_DEFAULT_PROFILE = authCache.profile;
-    env.AWS_REGION = 'us-east-1';
+    env.AWS_REGION = CFG.region;
   }
 
   const proc = spawnStream(ns, env);
@@ -442,8 +464,9 @@ wss.on('connection', ws => {
 const SESSION_ID = loadOrCreateSession();
 const VIEWER_URL = `${RELAY_HTTP_URL}/?session=${SESSION_ID}`;
 
+const clusterCount = Object.keys(CFG.clusters).length;
 console.log(`\n  Kube Logger Agent on ws://localhost:${PORT}  [build:ns-multi-v1]`);
-console.log(`  Tool: ${LOG_TOOL} | Profiles: ${Object.keys(CLUSTERS).join(', ')}`);
+console.log(`  Tool: ${LOG_TOOL} | Region: ${CFG.region} | Clusters configured: ${clusterCount || `0 — edit ${CONFIG_FILE}`}`);
 console.log(`  Viewer: ${VIEWER_URL}\n`);
 
 setSaasTarget(RELAY_WS_URL, SESSION_ID);

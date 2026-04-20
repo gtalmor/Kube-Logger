@@ -1555,11 +1555,6 @@ const Drawer = (() => {
     $('setupDrawer').setAttribute('aria-hidden','true');
   }
 
-  // Shorten Example-specific profile names; leave others as-is.
-  function prettyProfileName(p) {
-    return p.replace('example-','').replace('-profile-a',' (Lab)').replace('-profile-b',' (Prod)');
-  }
-
   function populateProfiles(profiles) {
     if (profiles) allProfiles = profiles;
     const sel = $('profile');
@@ -1568,7 +1563,7 @@ const Drawer = (() => {
     for (const p of allProfiles) {
       if (disabledProfiles.has(p)) continue;
       const opt = document.createElement('option');
-      opt.value = p; opt.textContent = prettyProfileName(p);
+      opt.value = p; opt.textContent = p;
       sel.appendChild(opt);
     }
     const choose = (previous && !disabledProfiles.has(previous)) ? previous
