@@ -1,0 +1,44 @@
+name: Release agent binaries
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (e.g. v0.1.0)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Cross-compile all platforms
+        run: bun run build:all
+
+      - name: Generate SHA256 sums
+        working-directory: dist
+        run: sha256sum kube-logger-agent-* > SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          gh release create "$TAG" \
+            --title "Kube Logger Agent $TAG" \
+            --notes "Download the binary for your platform, \`chmod +x\`, and run. Verify against SHA256SUMS." \
+            dist/kube-logger-agent-darwin-arm64 \
+            dist/kube-logger-agent-darwin-x64 \
+            dist/kube-logger-agent-linux-x64 \
+            dist/kube-logger-agent-linux-arm64 \
+            dist/SHA256SUMS
