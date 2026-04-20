@@ -30,7 +30,7 @@ brew install kube-logger-agent
 
 ```sh
 # Pick the asset for your platform from https://github.com/gtalmor/Kube-Logger/releases/latest
-curl -LO https://github.com/gtalmor/Kube-Logger/releases/download/v0.1.0/kube-logger-agent-darwin-arm64
+curl -LO https://github.com/gtalmor/Kube-Logger/releases/latest/download/kube-logger-agent-darwin-arm64
 chmod +x kube-logger-agent-darwin-arm64
 ./kube-logger-agent-darwin-arm64
 ```
@@ -40,7 +40,7 @@ chmod +x kube-logger-agent-darwin-arm64
 Every release publishes a `SHA256SUMS` file alongside the binaries:
 
 ```sh
-curl -sL https://github.com/gtalmor/Kube-Logger/releases/download/v0.1.0/SHA256SUMS | \
+curl -sL https://github.com/gtalmor/Kube-Logger/releases/latest/download/SHA256SUMS | \
   shasum -a 256 -c --ignore-missing
 ```
 
@@ -52,7 +52,7 @@ curl -sL https://github.com/gtalmor/Kube-Logger/releases/download/v0.1.0/SHA256S
 kube-logger-agent
 ```
 
-On first run it creates `~/.kube-logger/` with a persistent session id and an empty config file, then prints your personal viewer URL:
+On first run it creates `~/.kube-logger/` with a persistent session id and an empty config file, prints your personal viewer URL, and opens it in your default browser. Set `KUBE_LOGGER_NO_BROWSER=1` to suppress the browser launch (e.g. under pm2 / systemd).
 
 ```
   Kube Logger Agent on ws://localhost:4040
