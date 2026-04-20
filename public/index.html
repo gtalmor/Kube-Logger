@@ -80,9 +80,28 @@
   .rec-banner { background:rgba(248,81,73,.06); border-bottom:1px solid rgba(248,81,73,.25); padding:5px 20px; font-size:11px; color:var(--error); display:none; align-items:center; gap:6px; flex-shrink:0; }
   .rec-banner.v { display:flex; }
   .rec-dot { width:9px; height:9px; border-radius:50%; background:var(--error); animation:rec 1s infinite; flex-shrink:0; }
-  .err-banner { background:rgba(248,81,73,.06); border-bottom:1px solid rgba(248,81,73,.25); padding:6px 20px; font-size:11px; color:var(--error); display:none; cursor:pointer; flex-shrink:0; }
+  .err-banner-wrap { position:relative; flex-shrink:0; }
+  .err-banner { background:rgba(248,81,73,.06); border-bottom:1px solid rgba(248,81,73,.25); padding:6px 20px; font-size:11px; color:var(--error); display:none; cursor:pointer; }
   .err-banner.v { display:block; }
   .err-banner:hover { background:rgba(248,81,73,.1); }
+  .err-list {
+    display:none; position:absolute; top:100%; left:0; right:0; z-index:70;
+    max-height:300px; overflow-y:auto;
+    background:var(--bg2); border:1px solid rgba(248,81,73,.35);
+    border-top:none;
+    box-shadow:0 6px 20px rgba(0,0,0,.5);
+  }
+  .err-list.v { display:block; }
+  .err-row {
+    display:flex; gap:10px; align-items:baseline;
+    padding:6px 20px; font-size:11px; color:var(--text);
+    cursor:pointer; border-bottom:1px solid var(--border);
+  }
+  .err-row:last-child { border-bottom:none; }
+  .err-row:hover { background:rgba(248,81,73,.08); }
+  .err-row .err-idx { color:var(--muted); font-family:'SF Mono',monospace; min-width:50px; flex-shrink:0; }
+  .err-row .err-sum { flex:1; color:var(--error); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .err-row .err-pod { color:var(--muted); font-size:10px; flex-shrink:0; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
   /* ── Flow timeline ── */
   .ftl { background:var(--bg2); border-bottom:1px solid var(--border); padding:8px 20px; flex-shrink:0; display:none; overflow-x:auto; }
@@ -479,7 +498,10 @@
 </div>
 
 <div class="rec-banner" id="recBanner"><span class="rec-dot"></span><span id="recInfo"></span></div>
-<div class="err-banner" id="errBanner"></div>
+<div class="err-banner-wrap" id="errBannerWrap">
+  <div class="err-banner" id="errBanner"></div>
+  <div class="err-list" id="errList"></div>
+</div>
 <div class="ftl" id="ftl"><div class="ftl-label">Flow Node Execution</div><div class="fnodes" id="fnodes"></div></div>
 
 <!-- Welcome -->

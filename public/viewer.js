@@ -1536,7 +1536,14 @@ let sto;$('searchInput').addEventListener('input',e=>{clearTimeout(sto);sto=setT
 $('hideTrace').addEventListener('click',e=>{S.hideTrace=!S.hideTrace;e.target.classList.toggle('active',S.hideTrace);e.target.textContent=S.hideTrace?'Show TRACE':'Hide TRACE';rebuildFiltered();fullRender();});
 $('hiddenBtn').addEventListener('click',e=>{e.stopPropagation();showHiddenPanel();});
 $('highlightBtn').addEventListener('click',e=>{e.stopPropagation();showHighlightPanel();});
-$('autoScroll').addEventListener('click',e=>{S.autoScroll=!S.autoScroll;e.target.textContent=`Auto-scroll: ${S.autoScroll?'ON':'OFF'}`;e.target.classList.toggle('active',S.autoScroll);});
+$('autoScroll').addEventListener('click',e=>{
+  S.autoScroll=!S.autoScroll;
+  e.target.textContent=`Auto-scroll: ${S.autoScroll?'ON':'OFF'}`;
+  e.target.classList.toggle('active',S.autoScroll);
+  // Re-enabling auto-scroll jumps to the tail immediately — the user's intent is
+  // "show me what's live right now," not "wait for the next line to arrive."
+  if(S.autoScroll){const c=$('lc');c.scrollTop=c.scrollHeight;}
+});
 // Turn auto-scroll OFF automatically if the user scrolls away from the bottom.
 // Programmatic scroll-to-bottom keeps distFromBottom ≈ 0, so this only fires
 // on a genuine manual scroll-up.
@@ -1552,7 +1559,47 @@ $('lc').addEventListener('scroll',()=>{
 });
 $('prevErr').addEventListener('click',()=>jumpErr('prev'));
 $('nextErr').addEventListener('click',()=>jumpErr('next'));
-$('errBanner').addEventListener('click',()=>jumpErr('next'));
+
+// Clicking the error banner toggles a list of every error on the session so
+// you can jump straight to whichever one you want (prev/next ▲▼ Err still work).
+function renderErrList(){
+  const el=$('errList');if(!el)return;
+  if(!S.errIdx.length){el.innerHTML='';return;}
+  let h='';
+  for(let k=0;k<S.errIdx.length;k++){
+    const i=S.errIdx[k];
+    const l=S.lines[i];if(!l)continue;
+    let sum='';
+    if(l.type==='http')sum=`${l.method||''} ${l.path||''} → ${l.status||''}`;
+    else sum=(l.msg||l.raw||'').slice(0,200);
+    const pod=l.pod?shortPod(l.pod):(l.ns||'');
+    h+=`<div class="err-row" data-jump="${i}">`
+      +`<span class="err-idx">#${i+1}</span>`
+      +`<span class="err-sum" title="${esc(sum)}">${esc(sum)}</span>`
+      +(pod?`<span class="err-pod">${esc(pod)}</span>`:'')
+      +`</div>`;
+  }
+  el.innerHTML=h;
+}
+function toggleErrList(){
+  const el=$('errList');if(!el)return;
+  if(el.classList.contains('v')){el.classList.remove('v');return;}
+  renderErrList();el.classList.add('v');
+}
+$('errBanner').addEventListener('click',e=>{e.stopPropagation();toggleErrList();});
+$('errList').addEventListener('click',e=>{
+  const row=e.target.closest('.err-row');if(!row)return;
+  const idx=parseInt(row.dataset.jump,10);
+  if(!Number.isNaN(idx)){
+    // Keep prev/next cursor in sync so ▲/▼ Err resume from where you jumped.
+    const pos=S.errIdx.indexOf(idx);if(pos>=0)S.curErr=pos;
+    scrollTo(idx);
+  }
+  $('errList').classList.remove('v');
+});
+document.addEventListener('click',e=>{
+  if(!e.target.closest('#errBannerWrap'))$('errList').classList.remove('v');
+});
 $('resetBtn').addEventListener('click',()=>{S.search='';S.hideTrace=false;triClear(S.level);triClear(S.pod);triClear(S.req);$('searchInput').value='';$('hideTrace').classList.remove('active');$('hideTrace').textContent='Hide TRACE';refreshAllTri();rebuildFiltered();fullRender();});
 $('exportBtn').addEventListener('click',()=>{const t=S.filtered.map(i=>S.raw[i]).join('\n');const b=new Blob([t],{type:'text/plain'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`logs-${new Date().toISOString().slice(0,19).replace(/[:.]/g,'-')}.txt`;a.click();toast('Exported');});
 $('openFile').addEventListener('click',()=>$('fileInput').click());
