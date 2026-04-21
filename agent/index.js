@@ -629,40 +629,46 @@ async function promptDuplicateAgent() {
   setSaasTarget(RELAY_WS_URL, SESSION_ID);
 
 // Hit the GitHub Releases API once at boot and print a banner if a newer
-// kube-logger-agent is available. Fire-and-forget, 3s timeout, silent on
-// any error. Set KUBE_LOGGER_NO_UPDATE_CHECK=1 to skip (daemonized runs).
+// kube-logger-agent is available. 3s timeout, silent on any error. Returns
+// a promise resolving to true if an upgrade banner was printed (so the
+// caller can pause before opening a browser tab on top of it). Set
+// KUBE_LOGGER_NO_UPDATE_CHECK=1 to skip entirely (daemonized runs).
 function checkForUpdate() {
-  if (process.env.KUBE_LOGGER_NO_UPDATE_CHECK) return;
-  const https = require('https');
-  const req = https.get({
-    host: 'api.github.com',
-    path: '/repos/gtalmor/Kube-Logger/releases/latest',
-    headers: {
-      'User-Agent': `kube-logger-agent/${VERSION}`,
-      Accept: 'application/vnd.github+json',
-    },
-    timeout: 3000,
-  }, res => {
-    if (res.statusCode !== 200) { res.resume(); return; }
-    let body = '';
-    res.on('data', c => body += c);
-    res.on('end', () => {
-      try {
-        const tag = JSON.parse(body).tag_name;
-        if (!tag) return;
-        const latest = tag.replace(/^v/, '');
-        if (!isNewerVersion(latest, VERSION)) return;
-        const bar = '─'.repeat(64);
-        console.error(`\n  ${bar}`);
-        console.error(`  A newer kube-logger-agent is available: v${latest} (you're on v${VERSION})`);
-        console.error(`  Upgrade:  brew upgrade kube-logger-agent`);
-        console.error(`  Notes:    https://github.com/gtalmor/Kube-Logger/releases/tag/${tag}`);
-        console.error(`  ${bar}\n`);
-      } catch {}
+  return new Promise(resolve => {
+    if (process.env.KUBE_LOGGER_NO_UPDATE_CHECK) return resolve(false);
+    const https = require('https');
+    const done = v => { try { resolve(v); } catch {} };
+    const req = https.get({
+      host: 'api.github.com',
+      path: '/repos/gtalmor/Kube-Logger/releases/latest',
+      headers: {
+        'User-Agent': `kube-logger-agent/${VERSION}`,
+        Accept: 'application/vnd.github+json',
+      },
+      timeout: 3000,
+    }, res => {
+      if (res.statusCode !== 200) { res.resume(); return done(false); }
+      let body = '';
+      res.on('data', c => body += c);
+      res.on('end', () => {
+        try {
+          const tag = JSON.parse(body).tag_name;
+          if (!tag) return done(false);
+          const latest = tag.replace(/^v/, '');
+          if (!isNewerVersion(latest, VERSION)) return done(false);
+          const bar = '─'.repeat(64);
+          console.error(`\n  ${bar}`);
+          console.error(`  A newer kube-logger-agent is available: v${latest} (you're on v${VERSION})`);
+          console.error(`  Upgrade:  brew upgrade kube-logger-agent`);
+          console.error(`  Notes:    https://github.com/gtalmor/Kube-Logger/releases/tag/${tag}`);
+          console.error(`  ${bar}\n`);
+          done(true);
+        } catch { done(false); }
+      });
     });
+    req.on('error', () => done(false));
+    req.on('timeout', () => { req.destroy(); done(false); });
   });
-  req.on('error', () => {});
-  req.on('timeout', () => req.destroy());
 }
 
 // Tiny semver-ish comparator — parts beyond what both have default to 0.
@@ -677,13 +683,22 @@ function isNewerVersion(a, b) {
   return false;
 }
 
-checkForUpdate();
+// Open the viewer in the user's default browser, AFTER the update check has
+// finished. If a newer version is available we pause for a keystroke so the
+// upgrade banner doesn't get buried under the new tab opening — but only in
+// an interactive TTY (daemons just continue).
+const updateAvailable = await checkForUpdate();
 
-// Open the viewer in the user's default browser. Most OS openers focus an
-// existing tab if one is already on the same URL, so restarts don't spam
-// duplicate tabs. Set KUBE_LOGGER_NO_BROWSER=1 to skip (useful for headless
-// runs under pm2/systemd).
 if (!process.env.KUBE_LOGGER_NO_BROWSER) {
+  if (updateAvailable && process.stdin.isTTY) {
+    process.stderr.write('  Press Enter to continue and open the viewer (or Ctrl-C to upgrade first)… ');
+    await new Promise(resolve => {
+      const onData = () => { process.stdin.removeListener('data', onData); process.stdin.pause(); resolve(); };
+      process.stdin.resume();
+      process.stdin.once('data', onData);
+    });
+    process.stderr.write('\n');
+  }
   const opener = { darwin: 'open', linux: 'xdg-open', win32: 'start' }[process.platform];
   if (opener) {
     try {
