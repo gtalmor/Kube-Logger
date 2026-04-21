@@ -374,6 +374,14 @@ function attachStream(ns) {
     stderrBuf += msg + '\n';
     if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000);
     console.error(`[${ns}] stderr: ${msg.slice(0, 500)}`);
+    // Early SSO/auth-expiration detection: stern/kubectl surfaces these on
+    // stderr well before our 60s periodic checkAuth would notice. Invalidate
+    // authCache immediately so the viewer gets an instant signal.
+    if (/Token has expired|ExpiredToken|InvalidClientTokenId|UnauthorizedOperation|refresh failed|ExpiredTokenException|unable to get a Token|SSOTokenLoadError/i.test(msg)) {
+      const prev = authCache || {};
+      authCache = { ts: Date.now(), profile: prev.profile, ok: false, err: 'SSO token expired — re-login' };
+      broadcast({ type: 'auth-status', ...authCache });
+    }
     if (isCurrent()) broadcast({ type: 'stderr', ns, msg });
   });
 

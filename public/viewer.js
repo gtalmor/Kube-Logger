@@ -1356,6 +1356,7 @@ function connect(){
         if(agentConnected){
           $('cLabel').textContent=(m.ok||m.authenticated)?(m.arn?m.arn.split('/').pop():'Auth OK'):'Not authed';
         }
+        updateSsoBanner(m);
         Drawer.onAuthStatus(m);
         break;
       case'auth-progress':Drawer.onAuthProgress(m);break;
@@ -1386,6 +1387,30 @@ function setAgentConnected(on,label){
   agentConnected=on;
   $('cDot').className='dot '+(on?'ok':'fail');
   if(label)$('cLabel').textContent=label;
+  if(!on)hideSsoBanner();
+}
+
+// Prominent banner across the top when the agent is around but SSO isn't —
+// keeps the user from wondering why their log stream quietly stopped.
+let ssoLastProfile='';
+function updateSsoBanner(m){
+  const ok=m.ok||m.authenticated;
+  if(m.profile)ssoLastProfile=m.profile;
+  if(ok){hideSsoBanner();return;}
+  if(!agentConnected){hideSsoBanner();return;}
+  const b=$('ssoBanner');if(!b)return;
+  const err=(m.err||m.error||'').toString();
+  $('ssoInfo').textContent=err?`SSO expired — ${err.slice(0,120)}`:'SSO expired — re-authenticate to keep streaming';
+  b.classList.add('v');
+}
+function hideSsoBanner(){const b=$('ssoBanner');if(b)b.classList.remove('v');}
+if($('ssoRelogin')){
+  $('ssoRelogin').addEventListener('click',()=>{
+    const p=ssoLastProfile||($('profile')&&$('profile').value);
+    if(!p){toast('Open Setup and pick a profile first');return;}
+    send({action:'login',profile:p});
+    $('ssoInfo').textContent='Opening SSO on agent machine…';
+  });
 }
 
 let timerIv;

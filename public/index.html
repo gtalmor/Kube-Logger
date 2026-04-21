@@ -79,6 +79,18 @@
   .sc { font-size:10px; color:var(--muted); white-space:nowrap; }
 
   /* ── Banners ── */
+  .sso-banner {
+    background: color-mix(in srgb, var(--warn) 14%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+    padding:6px 20px; font-size:11px; color:var(--warn);
+    display:none; align-items:center; gap:10px; flex-shrink:0;
+  }
+  .sso-banner.v { display:flex; }
+  .sso-banner .sso-icon { font-size:14px; }
+  .sso-banner #ssoInfo { flex:1; }
+  .sso-banner .sso-relogin { background: var(--warn); color:var(--bg); border-color: var(--warn); font-weight:600; padding:3px 10px; }
+  .sso-banner .sso-relogin:hover { filter:brightness(1.1); }
+
   .rec-banner { background:rgba(248,81,73,.06); border-bottom:1px solid rgba(248,81,73,.25); padding:5px 20px; font-size:11px; color:var(--error); display:none; align-items:center; gap:6px; flex-shrink:0; }
   .rec-banner.v { display:flex; }
   .rec-dot { width:9px; height:9px; border-radius:50%; background:var(--error); animation:rec 1s infinite; flex-shrink:0; }
@@ -528,6 +540,11 @@
   <button class="btn" id="openFile">Open File</button>
 </div>
 
+<div class="sso-banner" id="ssoBanner">
+  <span class="sso-icon">⚠</span>
+  <span id="ssoInfo">SSO expired — re-authenticate</span>
+  <button class="btn sso-relogin" id="ssoRelogin">Re-login</button>
+</div>
 <div class="rec-banner" id="recBanner"><span class="rec-dot"></span><span id="recInfo"></span></div>
 <div class="err-banner-wrap" id="errBannerWrap">
   <div class="err-banner" id="errBanner"></div>
