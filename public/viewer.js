@@ -239,6 +239,90 @@ function durBucket(ms){
   return 'slow';
 }
 
+// Render the detail block that appears under a waterfall row when expanded:
+// what happened during this node's [start, end] window — log lines, HTTP
+// calls, DB query timings, and gaps of silence that usually indicate the
+// node was waiting on something external.
+function renderNodeDetail(bar, reqId) {
+  const startMs = bar.start, endMs = bar.start + bar.dur;
+  const inWindow = l => {
+    if (!l || !l.timestamp) return false;
+    const t = Date.parse(l.timestamp);
+    return !Number.isNaN(t) && t >= startMs && t <= endMs;
+  };
+  // Same-request lines (excluding the noisy DB heartbeat ones).
+  const reqLines = S.lines.filter(l => l && l.reqId === reqId && inWindow(l));
+  const httpLines = S.lines.filter(l => l && l.type === 'http' && inWindow(l));
+
+  // DB query pairs — match "X started" with "X finished" by message similarity.
+  const dbStarts = new Map();
+  const dbPairs = [];
+  for (const l of reqLines) {
+    const m = (l.msg || '').match(/^(.+?)(?:\s+(?:count|query|find|aggregate))?\s+(started|finished)$/);
+    if (!m) continue;
+    const phase = m[2];
+    const key = m[1];
+    if (phase === 'started') dbStarts.set(key, { ts: Date.parse(l.timestamp), lineIdx: l.idx });
+    else if (phase === 'finished' && dbStarts.has(key)) {
+      const s = dbStarts.get(key);
+      dbStarts.delete(key);
+      const dur = Date.parse(l.timestamp) - s.ts;
+      if (dur >= 0) dbPairs.push({ label: key, dur, lineIdx: s.lineIdx });
+    }
+  }
+
+  // Gap detection — any > 200ms silence between consecutive log lines is suspicious.
+  const sortedTs = reqLines
+    .map(l => ({ t: Date.parse(l.timestamp), lineIdx: l.idx, msg: l.msg || l.raw || '' }))
+    .filter(x => !Number.isNaN(x.t))
+    .sort((a, b) => a.t - b.t);
+  const gaps = [];
+  for (let i = 1; i < sortedTs.length; i++) {
+    const gap = sortedTs[i].t - sortedTs[i - 1].t;
+    if (gap >= 200) gaps.push({ ms: gap, afterLine: sortedTs[i - 1].lineIdx, nextLine: sortedTs[i].lineIdx, nextMsg: sortedTs[i].msg.slice(0, 90) });
+  }
+
+  let h = '';
+  if (dbPairs.length) {
+    h += `<div class="wf-d-section"><div class="wf-d-label">DB / external calls (${dbPairs.length})</div>`;
+    dbPairs.sort((a, b) => b.dur - a.dur);
+    for (const d of dbPairs.slice(0, 8)) {
+      h += `<div class="wf-d-row" data-i="${d.lineIdx}"><span class="wf-d-tag dur-${durBucket(d.dur)}">${fmtMs(d.dur)}</span><span class="wf-d-msg">${esc(d.label)}</span></div>`;
+    }
+    h += `</div>`;
+  }
+  if (httpLines.length) {
+    h += `<div class="wf-d-section"><div class="wf-d-label">HTTP requests during this node (${httpLines.length})</div>`;
+    for (const l of httpLines.slice(0, 8)) {
+      const sc = l.status >= 500 ? 's5' : l.status >= 400 ? 's4' : 's2';
+      h += `<div class="wf-d-row" data-i="${l.idx}"><span class="wf-d-tag ${sc}">${l.status}</span><span class="wf-d-msg">${esc(l.method || '')} ${esc(l.path || '')} · ${l.size || 0}B</span></div>`;
+    }
+    h += `</div>`;
+  }
+  if (gaps.length) {
+    h += `<div class="wf-d-section"><div class="wf-d-label">Silence gaps ≥ 200ms (likely waiting on external work)</div>`;
+    gaps.sort((a, b) => b.ms - a.ms);
+    for (const g of gaps.slice(0, 5)) {
+      h += `<div class="wf-d-row" data-i="${g.nextLine}"><span class="wf-d-tag dur-${durBucket(g.ms)}">${fmtMs(g.ms)} silence</span><span class="wf-d-msg">… then: ${esc(g.nextMsg)}</span></div>`;
+    }
+    h += `</div>`;
+  }
+  // Filter the in-window log lines to the high-signal ones (errors + flow state).
+  const sigLines = reqLines.filter(l =>
+    l.level === 'ERROR' || l.level === 'FATAL' || l.flowState || l.isFlowError || l.isErrorDetail
+  );
+  if (sigLines.length) {
+    h += `<div class="wf-d-section"><div class="wf-d-label">Key events in window (${sigLines.length})</div>`;
+    for (const l of sigLines.slice(0, 12)) {
+      const cls = l.level === 'ERROR' || l.level === 'FATAL' ? 'err' : '';
+      h += `<div class="wf-d-row ${cls}" data-i="${l.idx}"><span class="wf-d-ts">${esc(l.timestamp ? fmtTs(l.timestamp) : '')}</span><span class="wf-d-msg">${esc((l.msg || l.raw || '').slice(0, 220))}</span></div>`;
+    }
+    h += `</div>`;
+  }
+  if (!h) h = `<div class="wf-d-empty">No additional detail in this node's window.</div>`;
+  return h;
+}
+
 // Build the per-execution waterfall data for one flow exec. Returns
 // { minStart, total, bars: [{node, start, dur, lineIdx, state}, ...] } or null.
 function buildWaterfall(flow){
@@ -1161,20 +1245,25 @@ function openTrace(reqId){
     h+='</div>';
   }
 
-  // Per-execution timing waterfall — bar chart showing where the time went.
+  // Per-execution timing waterfall — bar chart + click-to-expand drill-down
+  // showing every event that happened during a node's [start, end] window.
   for(const f of flowOrder){
     const wf=buildWaterfall(f);
     if(!wf||!wf.bars.length)continue;
-    h+=`<div class="tp-section"><div class="tp-section-label">Timing — ${esc(f.name||'flow')} <span class="tp-exec-id">${esc(f.execId.slice(0,8))}</span> · total ${fmtMs(wf.total)}</div>`;
+    h+=`<div class="tp-section"><div class="tp-section-label">Timing — ${esc(f.name||'flow')} <span class="tp-exec-id">${esc(f.execId.slice(0,8))}</span> · total ${fmtMs(wf.total)} · click a row to dive in</div>`;
     h+='<div class="wf">';
-    for(const b of wf.bars){
+    for(let bi=0;bi<wf.bars.length;bi++){
+      const b=wf.bars[bi];
       const offsetPct=wf.total?((b.start-wf.minStart)/wf.total*100):0;
       const widthPct=wf.total?Math.max(0.5,b.dur/wf.total*100):100;
-      h+=`<div class="wf-row" data-i="${b.lineIdx}" title="${esc(b.node)} — ${fmtMs(b.dur)} (${b.state})">`
+      const detailId=`wfd-${bi}`;
+      h+=`<div class="wf-row" data-expand="${detailId}" title="${esc(b.node)} — ${fmtMs(b.dur)} (${b.state}) · click to expand">`
+        +`<span class="wf-caret" data-caret-for="${detailId}">▸</span>`
         +`<span class="wf-name">${esc(b.node)}</span>`
         +`<span class="wf-track"><span class="wf-bar dur-${durBucket(b.dur)}${b.state==='failed'?' failed':''}" style="left:${offsetPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span></span>`
         +`<span class="wf-dur">${fmtMs(b.dur)}</span>`
-        +`</div>`;
+        +`</div>`
+        +`<div class="wf-detail" id="${detailId}">${renderNodeDetail(b,reqId)}</div>`;
     }
     h+='</div></div>';
   }
@@ -1246,6 +1335,18 @@ function openTrace(reqId){
   $('tracePanel').classList.add('v');
 
   $('tpBody').onclick=e=>{
+    // Waterfall expand toggle takes priority over the global jump-to-line click.
+    const wfRow=e.target.closest('.wf-row[data-expand]');
+    if(wfRow){
+      const id=wfRow.dataset.expand;
+      const detail=document.getElementById(id);
+      const caret=wfRow.querySelector('.wf-caret');
+      if(detail){
+        const open=detail.classList.toggle('v');
+        if(caret)caret.textContent=open?'▾':'▸';
+      }
+      return;
+    }
     const el=e.target.closest('[data-i]');
     if(el){const idx=+el.dataset.i;scrollTo(idx);}
   };

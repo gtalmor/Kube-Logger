@@ -276,6 +276,37 @@
   .wf-bar.dur-slow { background:var(--error); }
   .wf-bar.failed   { background:var(--error); outline:1px solid var(--error); }
   .wf-dur { width:60px; text-align:right; color:var(--muted); font-family:'SF Mono',monospace; flex-shrink:0; }
+  .wf-caret { width:12px; color:var(--muted); font-size:10px; flex-shrink:0; user-select:none; }
+  .wf-detail {
+    display:none; margin:6px 0 14px 156px; padding:8px 12px;
+    border-left:2px solid var(--border); background:rgba(255,255,255,0.02);
+    font-size:11px;
+  }
+  .wf-detail.v { display:block; }
+  .wf-d-section { margin-bottom:8px; }
+  .wf-d-section:last-child { margin-bottom:0; }
+  .wf-d-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.4px; margin-bottom:4px; }
+  .wf-d-row {
+    display:flex; align-items:flex-start; gap:8px; padding:2px 0;
+    cursor:pointer; border-radius:3px;
+  }
+  .wf-d-row:hover { background:rgba(255,255,255,0.04); }
+  .wf-d-row.err .wf-d-msg { color:var(--error); }
+  .wf-d-row .wf-d-tag {
+    flex-shrink:0; min-width:60px; text-align:center;
+    padding:1px 6px; border-radius:3px; font-family:'SF Mono',monospace;
+    font-size:10px; color:var(--text); background:var(--bg3);
+  }
+  .wf-d-row .wf-d-tag.dur-fast { color:var(--debug); }
+  .wf-d-row .wf-d-tag.dur-ok   { color:var(--accent); }
+  .wf-d-row .wf-d-tag.dur-warn { color:var(--warn); }
+  .wf-d-row .wf-d-tag.dur-slow { color:var(--error); font-weight:600; }
+  .wf-d-row .wf-d-tag.s2 { color:var(--success); }
+  .wf-d-row .wf-d-tag.s4 { color:var(--warn); }
+  .wf-d-row .wf-d-tag.s5 { color:var(--error); }
+  .wf-d-row .wf-d-ts { flex-shrink:0; color:var(--muted); font-family:'SF Mono',monospace; font-size:10px; min-width:80px; }
+  .wf-d-row .wf-d-msg { flex:1; color:var(--text); word-break:break-word; }
+  .wf-d-empty { color:var(--muted); font-style:italic; padding:4px 0; }
 
   .tp-section { padding:0 16px 12px; border-bottom:1px solid var(--border); margin-bottom:10px; }
   .tp-section-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; }
