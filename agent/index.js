@@ -659,7 +659,7 @@ function checkForUpdate() {
           const bar = '─'.repeat(64);
           console.error(`\n  ${bar}`);
           console.error(`  A newer kube-logger-agent is available: v${latest} (you're on v${VERSION})`);
-          console.error(`  Upgrade:  brew upgrade kube-logger-agent`);
+          console.error(`  Upgrade:  brew update && brew upgrade kube-logger-agent`);
           console.error(`  Notes:    https://github.com/gtalmor/Kube-Logger/releases/tag/${tag}`);
           console.error(`  ${bar}\n`);
           done(true);
@@ -689,16 +689,45 @@ function isNewerVersion(a, b) {
 // an interactive TTY (daemons just continue).
 const updateAvailable = await checkForUpdate();
 
-if (!process.env.KUBE_LOGGER_NO_BROWSER) {
-  if (updateAvailable && process.stdin.isTTY) {
-    process.stderr.write('  Press Enter to continue and open the viewer (or Ctrl-C to upgrade first)… ');
-    await new Promise(resolve => {
-      const onData = () => { process.stdin.removeListener('data', onData); process.stdin.pause(); resolve(); };
-      process.stdin.resume();
-      process.stdin.once('data', onData);
-    });
-    process.stderr.write('\n');
+if (updateAvailable && process.stdin.isTTY) {
+  // Offer an in-place 'brew update && brew upgrade' if brew is on PATH.
+  const haveBrew = (() => {
+    try { execSync('command -v brew', { stdio: 'ignore' }); return true; }
+    catch { return false; }
+  })();
+  const prompt = haveBrew
+    ? "  Press Enter to continue, or 'u' + Enter to run brew update && upgrade now: "
+    : '  Press Enter to continue (or Ctrl-C to upgrade first)… ';
+  process.stderr.write(prompt);
+  const choice = await new Promise(resolve => {
+    let buf = '';
+    const onData = chunk => {
+      buf += chunk.toString();
+      if (buf.includes('\n')) {
+        process.stdin.removeListener('data', onData);
+        process.stdin.pause();
+        resolve(buf.trim().toLowerCase());
+      }
+    };
+    process.stdin.resume();
+    process.stdin.on('data', onData);
+  });
+  if (haveBrew && choice === 'u') {
+    process.stderr.write('\n  Running: brew update && brew upgrade kube-logger-agent\n\n');
+    const r = require('child_process').spawnSync('sh', ['-c', 'brew update && brew upgrade kube-logger-agent'], { stdio: 'inherit' });
+    if (r.status === 0) {
+      process.stderr.write('\n  Upgraded. Re-run kube-logger-agent to use the new version.\n');
+    } else {
+      process.stderr.write(`\n  brew upgrade exited with status ${r.status}. You may need to upgrade manually.\n`);
+    }
+    process.exit(r.status || 0);
   }
+}
+
+// Open the viewer in the user's default browser. Most OS openers focus an
+// existing tab if one is already on the same URL, so restarts don't spam
+// duplicate tabs. Set KUBE_LOGGER_NO_BROWSER=1 to skip.
+if (!process.env.KUBE_LOGGER_NO_BROWSER) {
   const opener = { darwin: 'open', linux: 'xdg-open', win32: 'start' }[process.platform];
   if (opener) {
     try {
