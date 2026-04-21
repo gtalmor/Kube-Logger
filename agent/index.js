@@ -13,10 +13,32 @@ const fs = require('fs');
 // tag (e.g. "0.1.3") before `bun build --compile` bundles it into the binary.
 const { version: VERSION } = require('../package.json');
 
-// Handle --version / -v before we do anything else (no relay connect, no
-// config file touched). Useful for `brew list --versions` cross-checks.
-if (process.argv.slice(2).some(a => a === '--version' || a === '-v')) {
+// Handle early CLI flags before any side-effects (no relay connect, no
+// config file written). Useful for `brew list --versions` cross-checks and
+// for re-opening the viewer tab against a background-running agent.
+const _cli = process.argv.slice(2);
+if (_cli.some(a => a === '--version' || a === '-v')) {
   console.log(`kube-logger-agent ${VERSION} (${process.platform}-${process.arch})`);
+  process.exit(0);
+}
+if (_cli.some(a => a === '--open' || a === '-o')) {
+  // Read the persisted session without creating one — if it's missing, the
+  // agent hasn't been started yet, so tell the user and bail.
+  const sessionFile = path.join(os.homedir(), '.kube-logger', 'session');
+  let sid = '';
+  try { sid = fs.readFileSync(sessionFile, 'utf8').trim(); } catch {}
+  if (!sid || sid.length < 16) {
+    console.error('No session yet — start `kube-logger-agent` at least once first.');
+    process.exit(1);
+  }
+  const relay = (process.env.KUBE_LOGGER_RELAY || 'https://logviewer.gtalmor.com').replace(/\/+$/, '');
+  const url = `${relay}/?session=${sid}`;
+  console.log(url);
+  const opener = { darwin: 'open', linux: 'xdg-open', win32: 'start' }[process.platform];
+  if (opener) {
+    try { spawn(opener, [url], { stdio: 'ignore', detached: true, shell: process.platform === 'win32' }).unref(); }
+    catch {}
+  }
   process.exit(0);
 }
 

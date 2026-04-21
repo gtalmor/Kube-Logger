@@ -7,6 +7,24 @@ console.log('[Kube Logger web viewer] build:saas-v1 loaded');
 const _urlParams = new URLSearchParams(location.search);
 const SESSION_ID = (_urlParams.get('s') || _urlParams.get('session') || '').trim();
 const RO_TOKEN   = (_urlParams.get('rotoken') || '').trim();
+const LAST_SESSION_KEY = 'kubelogger.lastSession.v1';
+
+// Auto-rediscover: if someone lands on logviewer.gtalmor.com/ with no
+// session (e.g. bookmarked the domain alone, reopened the browser), redirect
+// to the last session we saw — makes the domain itself a valid bookmark.
+// Invitees (rotoken) are never redirected — they stay on the read-only URL.
+let _redirecting = false;
+if (!SESSION_ID && !RO_TOKEN) {
+  try {
+    const last = localStorage.getItem(LAST_SESSION_KEY);
+    if (last && /^[a-f0-9]{16,}$/.test(last)) {
+      _redirecting = true;
+      location.replace(`?session=${last}`);
+    }
+  } catch {}
+}
+// Remember the current session so the next plain-domain visit can auto-land.
+if (SESSION_ID) { try { localStorage.setItem(LAST_SESSION_KEY, SESSION_ID); } catch {} }
 const AGENT_URL = (() => {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   if (RO_TOKEN) return `${proto}//${location.host}/consumer?rotoken=${encodeURIComponent(RO_TOKEN)}`;
@@ -1259,6 +1277,7 @@ function addLive(raw,ns){
 
 // ── WebSocket ─────────────────
 function connect(){
+  if(_redirecting)return;
   if(!SESSION_ID&&!RO_TOKEN){
     $('cLabel').textContent='No session — run kube-logger-agent and open the URL it prints.';
     setConn(false);
