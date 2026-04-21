@@ -309,6 +309,7 @@ wss.on('connection', ws => {
     if (ws.readOnly) return;
     if (m && m.action === 'create-invite') { handleCreateInvite(ws, m); return; }
     if (m && m.action === 'revoke-invite') { handleRevokeInvite(ws, m); return; }
+    if (m && m.action === 'kick-invitees') { handleKickInvitees(ws); return; }
     if (s.producer && s.producer.readyState === 1) s.producer.send(raw);
   });
 
@@ -375,6 +376,24 @@ function handleCreateInvite(ws, msg) {
     expiresAt,
     oneUse,
   }));
+}
+
+// Owner-initiated panic button: invalidate every outstanding invite + ro-token
+// for this session and forcibly close any read-only consumer currently viewing.
+// Owners stay connected (only invitees / read-only sockets get the boot).
+function handleKickInvitees(ws) {
+  let revokedInvites = 0, revokedTokens = 0, kicked = 0;
+  for (const [code, inv] of invites)   if (inv.session === ws.session)  { invites.delete(code); revokedInvites++; }
+  for (const [tok, t]   of roTokens)   if (t.session   === ws.session)  { roTokens.delete(tok); revokedTokens++; }
+  scheduleSave();
+  const s = sessions.get(ws.session);
+  if (s) {
+    for (const c of [...s.consumers]) {
+      if (c.readOnly) { try { c.close(4001, 'kicked by owner'); } catch {} kicked++; }
+    }
+    safeSend(ws, JSON.stringify({ type: 'kicked', revokedInvites, revokedTokens, kicked }));
+  }
+  log(ws.session, `kick-invitees: revoked ${revokedInvites} invites, ${revokedTokens} tokens; kicked ${kicked} sockets`);
 }
 
 function handleRevokeInvite(ws, msg) {

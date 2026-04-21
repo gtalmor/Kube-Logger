@@ -889,6 +889,11 @@ function showHiddenPanel(){
   if(total)h+='<span class="hp-clear" data-clear="all">Clear All</span>';
   h+='</div>';
 
+  // Free-text "hide any line containing…" — same matching as click-to-hide patterns,
+  // case-insensitive substring against l.msg / l.raw.
+  h+=`<div class="hp-section-label">Add a custom hide pattern</div>`
+   + `<div class="hp-add"><input type="text" id="hpAddInput" placeholder="Substring to hide (e.g. health probe)" /><button class="btn" id="hpAddBtn">Hide</button></div>`;
+
   // Hidden flow executions
   if(S.hiddenExecIds.size){
     h+='<div class="hp-section-label">Hidden Flows</div><div class="hp-list">';
@@ -925,7 +930,19 @@ function showHiddenPanel(){
       return;
     }
     if(e.target.closest('[data-clear="all"]')){clearHiddenPatterns();clearHiddenExecs();pop.remove();toast('All cleared');return;}
+    if(e.target.id==='hpAddBtn'){
+      e.stopPropagation();
+      const input=document.getElementById('hpAddInput');
+      const pat=(input&&input.value||'').trim();
+      if(!pat){input&&input.focus();return;}
+      addHiddenPattern(pat);
+      pop.remove();showHiddenPanel();
+      toast(`Hidden: lines containing "${pat.slice(0,40)}${pat.length>40?'...':''}"`);
+    }
   });
+  // Submit on Enter inside the input.
+  const inp=pop.querySelector('#hpAddInput');
+  if(inp){inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();const btn=document.getElementById('hpAddBtn');btn&&btn.click();}});}
   setTimeout(()=>document.addEventListener('click',function cl(e){if(!pop.contains(e.target)&&e.target!==($('hiddenBtn'))){pop.remove();document.removeEventListener('click',cl);}},{once:false}),0);
 }
 
@@ -1164,10 +1181,40 @@ function renderJv(value,key,isLast){
   if(tp==='boolean'){row.innerHTML=keyHtml+`<span class="jv-bool">${value}</span>`+comma;return row;}
   if(tp==='number'){row.innerHTML=keyHtml+`<span class="jv-num">${value}</span>`+comma;return row;}
   if(tp==='string'){
-    // Try to detect embedded JSON in the string value
+    // Whole-string JSON?
     const trimmed=value.trim();
     if(trimmed.length>2&&((trimmed[0]==='{'&&trimmed[trimmed.length-1]==='}')||(trimmed[0]==='['&&trimmed[trimmed.length-1]===']'))){
       try{const parsed=JSON.parse(trimmed);return renderJvObject(parsed,key,isLast,true);}catch{}
+    }
+    // Embedded JSON after a non-JSON prefix? e.g. 'Device Profile: {"a":1,...}'.
+    // Take the first { or [ to the last matching closer, attempt to parse;
+    // on success, render the prefix as a string and the JSON as a collapsible child.
+    {
+      const i1=value.indexOf('{'), i2=value.indexOf('[');
+      const startIdx = (i1<0?Infinity:i1) < (i2<0?Infinity:i2) ? i1 : i2;
+      if (startIdx>0){
+        const lastIdx=Math.max(value.lastIndexOf('}'),value.lastIndexOf(']'));
+        if (lastIdx>startIdx){
+          try {
+            const parsed=JSON.parse(value.slice(startIdx,lastIdx+1));
+            const prefix=value.slice(0,startIdx);
+            const wrap=document.createElement('div');
+            wrap.className='jv-mixed';
+            const head=document.createElement('div');
+            head.className='jv-row';
+            head.innerHTML=keyHtml+`<span class="jv-str">"${esc(prefix)}</span>`;
+            wrap.appendChild(head);
+            const nested=renderJvObject(parsed,undefined,true,true);
+            nested.style.marginLeft='14px';
+            wrap.appendChild(nested);
+            const tail=document.createElement('div');
+            tail.className='jv-row';
+            tail.innerHTML=`<span class="jv-str">"</span>`+comma;
+            wrap.appendChild(tail);
+            return wrap;
+          } catch {}
+        }
+      }
     }
     // Long string: show short + [more] toggle
     if(value.length>160){
@@ -1313,6 +1360,9 @@ function connect(){
         break;
       case'invite-revoked':
         ShareView.onInviteRevoked(m);
+        break;
+      case'kicked':
+        toast(`Kicked ${m.kicked||0} viewer(s); revoked ${m.revokedInvites||0} invite(s)`);
         break;
       case'producer-ready':
         setAgentConnected(true,'Agent connected');
@@ -1987,6 +2037,9 @@ const ShareView = (() => {
       <button class="btn sp-btn-primary" id="spGenerate" style="margin-top:8px;width:100%">Generate invite link</button>
       <div class="sp-hint">Invitees see logs live but can't start / stop captures or change settings. Links are 128-bit random; can't be guessed.</div>
       <div class="sp-result" id="spResult"></div>
+      <div class="sp-label" style="margin-top:14px;border-top:1px solid var(--border);padding-top:10px">Panic button</div>
+      <button class="btn" id="spKick" style="width:100%;background:rgba(248,81,73,.12);border-color:var(--error);color:var(--error);font-weight:600">Disconnect all viewers + revoke invites</button>
+      <div class="sp-hint">Closes every read-only viewer's socket and invalidates every outstanding invite for this session. You stay connected.</div>
     `;
     $('spGenerate').addEventListener('click', () => {
       const ttl = parseInt($('spTtl').value, 10);
@@ -1994,6 +2047,10 @@ const ShareView = (() => {
       $('spGenerate').disabled = true;
       $('spGenerate').textContent = 'Generating…';
       send({ action: 'create-invite', ttl, oneUse });
+    });
+    $('spKick').addEventListener('click', () => {
+      if (!confirm('Disconnect every read-only viewer and revoke all invites for this session?')) return;
+      send({ action: 'kick-invitees' });
     });
   }
 
@@ -2324,10 +2381,19 @@ const Drawer = (() => {
     onAuthProgress(m) { $('authInfo').textContent = m.msg || m.message || ''; },
     onAuthResult(m) {
       // Cluster-mapping / kubeconfig result is a separate concern from auth —
-      // surface it as a toast so it doesn't stomp on the auth line.
+      // surface it as a toast so it doesn't stomp on the auth line. Also hide
+      // the SSO banner on any ok result so the user gets immediate feedback
+      // even if the agent didn't broadcast an auth-status afterwards.
       const msg = m.msg || m.message;
       if (msg) toast(msg);
-      if (m.ok || m.success) $('loadNs').disabled = false;
+      if (m.ok || m.success) {
+        $('loadNs').disabled = false;
+        hideSsoBanner();
+        // Kick off a check-auth so authCache / arn / expiresAt get populated
+        // on older agents that don't broadcast auth-status post-SSO on their own.
+        const p = $('profile').value || lastProfile;
+        if (p) send({ action: 'check-auth', profile: p });
+      }
     },
 
     onNamespaces(m) {
