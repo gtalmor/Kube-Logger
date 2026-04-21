@@ -1284,7 +1284,7 @@ function connect(){
     return;
   }
   try{S.ws=new WebSocket(AGENT_URL);}catch{return setConn(false);}
-  S.ws.onopen=()=>{setConn(true);send({action:'get-init'});};
+  S.ws.onopen=()=>{setConn(true);send({action:'get-init'});sendPresence();};
   S.ws.onclose=()=>{setConn(false);setTimeout(connect,3000);};
   S.ws.onerror=()=>{};
   S.ws.onmessage=ev=>{
@@ -1297,6 +1297,9 @@ function connect(){
         setAgentConnected(!!m.producerConnected, m.producerConnected?'Agent connected':'Waiting for agent…');
         applyReadOnlyMode(!!m.readOnly);
         if(m.producerConnected&&!m.readOnly)send({action:'get-init'});
+        break;
+      case'presence':
+        renderPresence(m.counts);
         break;
       case'invite-created':
         ShareView.onInviteCreated(m);
@@ -1423,6 +1426,28 @@ function updateSsoBanner(m){
   b.classList.add('v');
 }
 function hideSsoBanner(){const b=$('ssoBanner');if(b)b.classList.remove('v');}
+// ── Presence pill ───────────────────────────────────────────────────
+// The relay counts connected consumers and marks each active/idle based on
+// the browser's visibilitychange events. Pill is hidden when it's only you.
+function sendPresence(){
+  if(S.ws&&S.ws.readyState===1){
+    try{S.ws.send(JSON.stringify({action:'presence',idle:!!document.hidden}));}catch{}
+  }
+}
+document.addEventListener('visibilitychange',sendPresence);
+
+function renderPresence(counts){
+  const el=$('presencePill');if(!el||!counts)return;
+  // Hide the pill when there's nothing interesting to show (just you).
+  if(counts.total<=1&&counts.invitees===0){el.style.display='none';return;}
+  const bits=[`👥 ${counts.total} viewing`];
+  if(counts.invitees)bits.push(`<span class="pp-sep">·</span> ${counts.invitees} invitee${counts.invitees===1?'':'s'}`);
+  if(counts.idle)    bits.push(`<span class="pp-sep">·</span> <span class="pp-idle">${counts.idle} idle</span>`);
+  el.innerHTML=bits.join(' ');
+  el.title=`owners: ${counts.owners}, invitees: ${counts.invitees}, active: ${counts.active}, idle: ${counts.idle}`;
+  el.style.display='';
+}
+
 if($('ssoRelogin')){
   $('ssoRelogin').addEventListener('click',()=>{
     const p=ssoLastProfile||($('profile')&&$('profile').value);

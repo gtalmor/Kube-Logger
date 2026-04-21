@@ -267,6 +267,7 @@ wss.on('connection', ws => {
   }
 
   // consumer
+  ws.idle = false;
   s.consumers.add(ws);
   log(ws.session, `consumer connected (producer: ${s.producer ? 'yes' : 'no'}, readOnly: ${ws.readOnly}, total: ${s.consumers.size})`);
 
@@ -276,27 +277,42 @@ wss.on('connection', ws => {
     producerConnected: !!s.producer,
     readOnly: ws.readOnly,
   }));
+  broadcastPresence(s);
 
   ws.on('message', buf => {
-    // Read-only consumers (invitees) cannot send anything upstream.
-    if (ws.readOnly) return;
     const raw = buf.toString();
-    // Intercept relay-handled actions before forwarding the rest to the producer.
-    try {
-      const m = JSON.parse(raw);
-      if (m && m.action === 'create-invite') { handleCreateInvite(ws, m); return; }
-      if (m && m.action === 'revoke-invite') { handleRevokeInvite(ws, m); return; }
-    } catch {}
+    let m = null;
+    try { m = JSON.parse(raw); } catch {}
+    // Presence bookkeeping is allowed from any consumer, including invitees.
+    if (m && m.action === 'presence') { ws.idle = !!m.idle; broadcastPresence(s); return; }
+    // Everything else from invitees is dropped.
+    if (ws.readOnly) return;
+    if (m && m.action === 'create-invite') { handleCreateInvite(ws, m); return; }
+    if (m && m.action === 'revoke-invite') { handleRevokeInvite(ws, m); return; }
     if (s.producer && s.producer.readyState === 1) s.producer.send(raw);
   });
 
   ws.on('close', () => {
     s.consumers.delete(ws);
     log(ws.session, `consumer disconnected (remaining: ${s.consumers.size})`);
+    broadcastPresence(s);
     dropIfEmpty(ws.session);
   });
   ws.on('error', e => log(ws.session, `consumer error: ${e.message}`));
 });
+
+function broadcastPresence(s) {
+  let owners = 0, invitees = 0, active = 0, idle = 0;
+  for (const c of s.consumers) {
+    if (c.readOnly) invitees++; else owners++;
+    if (c.idle) idle++; else active++;
+  }
+  const payload = JSON.stringify({
+    type: 'presence',
+    counts: { total: owners + invitees, owners, invitees, active, idle },
+  });
+  for (const c of s.consumers) if (c.readyState === 1) { try { c.send(payload); } catch {} }
+}
 
 // ── Invite handlers (invoked from an owner's consumer socket) ───────
 // `ws.session` is the owner's session; fan the reply out to all consumers

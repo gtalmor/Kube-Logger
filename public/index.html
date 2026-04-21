@@ -421,6 +421,15 @@
     color:var(--warn); font-size:10px; text-transform:uppercase; letter-spacing:0.5px;
   }
 
+  .presence-pill {
+    display:inline-flex; align-items:center; gap:5px;
+    padding:2px 9px; border-radius:10px;
+    background:var(--bg3); border:1px solid var(--border);
+    color:var(--text); font-size:10px;
+  }
+  .presence-pill .pp-idle { color:var(--muted); }
+  .presence-pill .pp-sep  { color:var(--border); }
+
   /* ── Setup drawer ── */
   .btn.setup-btn { font-size:11px; padding:4px 10px; }
   .setup-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; z-index:90; }
@@ -491,6 +500,7 @@
   <span id="buildTag" style="font-size:9px;color:var(--muted);opacity:0.6;letter-spacing:0.5px">build:saas-v10</span>
   <div class="ns-legend" id="nsLegend"></div>
   <div class="stats" id="stats"></div>
+  <span class="presence-pill" id="presencePill" style="display:none" title="People currently viewing this session"></span>
   <span class="ro-banner" id="roBanner" style="display:none" title="You are viewing a read-only invite — you can't control the capture">read-only</span>
   <div class="palette-wrap" id="paletteWrap">
     <button class="btn setup-btn" id="paletteBtn" title="Customize level colors">🎨</button>
