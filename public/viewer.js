@@ -243,13 +243,27 @@ function durBucket(ms){
 // what happened during this node's [start, end] window — log lines, HTTP
 // calls, DB query timings, and gaps of silence that usually indicate the
 // node was waiting on something external.
-function renderNodeDetail(bar, reqId) {
+function renderNodeDetail(bar, reqId, parentExecId) {
   const startMs = bar.start, endMs = bar.start + bar.dur;
   const inWindow = l => {
     if (!l || !l.timestamp) return false;
     const t = Date.parse(l.timestamp);
     return !Number.isNaN(t) && t >= startMs && t <= endMs;
   };
+
+  // Child flow executions — any flowExecId other than the parent whose
+  // events fall inside this node's window. Mostly populated by nested_flow.
+  const childFlows = new Map();
+  for (const l of S.lines) {
+    if (!l || !l.flowExecId || l.flowExecId === parentExecId) continue;
+    if (!inWindow(l)) continue;
+    if (!childFlows.has(l.flowExecId)) {
+      childFlows.set(l.flowExecId, { execId: l.flowExecId, name: l.flowName, nodes: [] });
+    }
+    const cf = childFlows.get(l.flowExecId);
+    if (!cf.name && l.flowName) cf.name = l.flowName;
+    if (l.flowNode) cf.nodes.push({ node: l.flowNode, state: l.flowState, lineIdx: l.idx, ts: l.timestamp });
+  }
   // Same-request lines (excluding the noisy DB heartbeat ones).
   const reqLines = S.lines.filter(l => l && l.reqId === reqId && inWindow(l));
   const httpLines = S.lines.filter(l => l && l.type === 'http' && inWindow(l));
@@ -283,6 +297,43 @@ function renderNodeDetail(bar, reqId) {
   }
 
   let h = '';
+
+  // Self vs child time summary — answers "is this node slow on its own,
+  // or is it just waiting for nested flows?"
+  if (childFlows.size) {
+    let childTotal = 0;
+    const cfList = [];
+    for (const cf of childFlows.values()) {
+      const cwf = buildWaterfall(cf);
+      if (cwf) { childTotal += cwf.total; cfList.push({ cf, cwf }); }
+    }
+    const selfMs = Math.max(0, bar.dur - childTotal);
+    const selfPct = bar.dur ? Math.round(selfMs / bar.dur * 100) : 0;
+    h += `<div class="wf-d-section"><div class="wf-d-label">Time breakdown</div>`
+       + `<div class="wf-d-row"><span class="wf-d-tag dur-${durBucket(selfMs)}">${fmtMs(selfMs)}</span><span class="wf-d-msg">self time (${selfPct}%) — work this node did directly</span></div>`
+       + `<div class="wf-d-row"><span class="wf-d-tag dur-${durBucket(childTotal)}">${fmtMs(childTotal)}</span><span class="wf-d-msg">in ${cfList.length} nested flow${cfList.length===1?'':'s'}</span></div>`
+       + `</div>`;
+    // Render each child flow as its own mini-waterfall, recursively expandable.
+    for (const { cf, cwf } of cfList) {
+      h += `<div class="wf-d-section"><div class="wf-d-label">↳ Nested flow: ${esc(cf.name || 'unknown')} <span class="tp-exec-id">${esc(cf.execId.slice(0,8))}</span> · total ${fmtMs(cwf.total)}</div>`;
+      h += `<div class="wf">`;
+      for (let bi = 0; bi < cwf.bars.length; bi++) {
+        const cb = cwf.bars[bi];
+        const offsetPct = cwf.total ? ((cb.start - cwf.minStart) / cwf.total * 100) : 0;
+        const widthPct  = cwf.total ? Math.max(0.5, cb.dur / cwf.total * 100) : 100;
+        const childDetailId = `wfd-${cf.execId}-${bi}`;
+        h += `<div class="wf-row" data-expand="${childDetailId}" title="${esc(cb.node)} — ${fmtMs(cb.dur)} (${cb.state})">`
+          +  `<span class="wf-caret">▸</span>`
+          +  `<span class="wf-name">${esc(cb.node)}</span>`
+          +  `<span class="wf-track"><span class="wf-bar dur-${durBucket(cb.dur)}${cb.state==='failed'?' failed':''}" style="left:${offsetPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span></span>`
+          +  `<span class="wf-dur">${fmtMs(cb.dur)}</span>`
+          +  `</div>`
+          +  `<div class="wf-detail" id="${childDetailId}">${renderNodeDetail(cb, reqId, cf.execId)}</div>`;
+      }
+      h += `</div></div>`;
+    }
+  }
+
   if (dbPairs.length) {
     h += `<div class="wf-d-section"><div class="wf-d-label">DB / external calls (${dbPairs.length})</div>`;
     dbPairs.sort((a, b) => b.dur - a.dur);
@@ -1263,7 +1314,7 @@ function openTrace(reqId){
         +`<span class="wf-track"><span class="wf-bar dur-${durBucket(b.dur)}${b.state==='failed'?' failed':''}" style="left:${offsetPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span></span>`
         +`<span class="wf-dur">${fmtMs(b.dur)}</span>`
         +`</div>`
-        +`<div class="wf-detail" id="${detailId}">${renderNodeDetail(b,reqId)}</div>`;
+        +`<div class="wf-detail" id="${detailId}">${renderNodeDetail(b,reqId,f.execId)}</div>`;
     }
     h+='</div></div>';
   }
