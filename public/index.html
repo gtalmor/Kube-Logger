@@ -256,8 +256,13 @@
   .toast.v { opacity:1; transform:translateY(0); }
 
   /* ── Trace panel ── */
-  .trace-panel { position:fixed; right:0; top:0; width:480px; height:100vh; background:var(--bg2); border-left:2px solid var(--accent); z-index:100; display:none; flex-direction:column; box-shadow:-4px 0 20px rgba(0,0,0,.5); }
+  .trace-panel { position:fixed; right:0; top:0; width:480px; min-width:320px; max-width:95vw; height:100vh; background:var(--bg2); border-left:2px solid var(--accent); z-index:100; display:none; flex-direction:column; box-shadow:-4px 0 20px rgba(0,0,0,.5); }
   .trace-panel.v { display:flex; }
+  .trace-panel .tp-resize {
+    position:absolute; left:-4px; top:0; bottom:0; width:8px;
+    cursor:col-resize; user-select:none; z-index:1;
+  }
+  .trace-panel .tp-resize:hover, .trace-panel .tp-resize.dragging { background:rgba(88,166,255,0.25); }
   .tp-header { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
   .tp-title { font-size:13px; font-weight:600; color:var(--bright); }
   .tp-body { flex:1; overflow-y:auto; padding:12px 0; }
@@ -668,6 +673,7 @@
 
 <!-- Trace Panel -->
 <div class="trace-panel" id="tracePanel">
+  <div class="tp-resize" id="tpResize" title="Drag to resize"></div>
   <div class="tp-header">
     <span class="tp-title" id="tpTitle">Flow Trace</span>
     <button class="btn" id="tpClose">&times;</button>

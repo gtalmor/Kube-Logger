@@ -1405,6 +1405,38 @@ function openTrace(reqId){
 
 function closeTrace(){$('tracePanel').classList.remove('v');}
 
+// ── Trace panel resize ──────────────────────────────────────────────
+// Drag the left edge to widen / narrow. Preferred width persists.
+(function wireTraceResize(){
+  const TP_KEY='kubelogger.tpWidth.v1';
+  const panel=$('tracePanel'), handle=$('tpResize');
+  if(!panel||!handle)return;
+  const saved=parseInt(localStorage.getItem(TP_KEY)||'',10);
+  if(saved>=320&&saved<=window.innerWidth*0.95)panel.style.width=saved+'px';
+  let dragging=false;
+  handle.addEventListener('mousedown',e=>{
+    e.preventDefault();
+    dragging=true;
+    handle.classList.add('dragging');
+    document.body.style.cursor='col-resize';
+    document.body.style.userSelect='none';
+  });
+  window.addEventListener('mousemove',e=>{
+    if(!dragging)return;
+    // Panel is right-anchored, so width = window width - mouse x.
+    const w=Math.max(320,Math.min(window.innerWidth*0.95,window.innerWidth-e.clientX));
+    panel.style.width=w+'px';
+  });
+  window.addEventListener('mouseup',()=>{
+    if(!dragging)return;
+    dragging=false;
+    handle.classList.remove('dragging');
+    document.body.style.cursor='';
+    document.body.style.userSelect='';
+    try{localStorage.setItem(TP_KEY,String(parseInt(panel.style.width,10)));}catch{}
+  });
+})();
+
 // ── JSON Inspector ──────────
 let jvCounter=0;
 let currentInspectValue=null;
