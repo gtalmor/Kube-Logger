@@ -281,6 +281,28 @@
   .wf-bar.dur-slow { background:var(--error); }
   .wf-bar.failed   { background:var(--error); outline:1px solid var(--error); }
   .wf-dur { width:60px; text-align:right; color:var(--muted); font-family:'SF Mono',monospace; flex-shrink:0; }
+  /* Per-type rollup at the top of each waterfall — answers 'across all the
+     api_be calls in this trace, what was the total / mean / max?' */
+  .wf-summary { margin-bottom:14px; padding:8px 10px; background:rgba(255,255,255,0.02); border-left:2px solid var(--border); border-radius:0 4px 4px 0; }
+  .wf-summary-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; margin-bottom:6px; }
+  .wf-summary-row {
+    display:grid; grid-template-columns: 140px 1fr 40px 60px 60px 60px;
+    gap:8px; align-items:center; padding:2px 0; font-size:11px;
+  }
+  .wf-summary-row.head { color:var(--muted); font-size:9px; text-transform:uppercase; letter-spacing:.4px; padding-bottom:4px; border-bottom:1px solid var(--border); margin-bottom:3px; }
+  .wf-summary-name { color:var(--text); font-family:'SF Mono',monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .wf-summary-bar { height:10px; position:relative; background:var(--bg); border-radius:2px; }
+  .wf-summary-fill { position:absolute; top:0; bottom:0; left:0; min-width:2px; border-radius:2px; }
+  .wf-summary-fill.dur-fast { background:var(--debug); }
+  .wf-summary-fill.dur-ok   { background:var(--accent); }
+  .wf-summary-fill.dur-warn { background:var(--warn); }
+  .wf-summary-fill.dur-slow { background:var(--error); }
+  .wf-summary-num { color:var(--text); font-family:'SF Mono',monospace; text-align:right; font-size:11px; }
+  .wf-summary-num.dur-fast { color:var(--debug); }
+  .wf-summary-num.dur-ok   { color:var(--text); }
+  .wf-summary-num.dur-warn { color:var(--warn); }
+  .wf-summary-num.dur-slow { color:var(--error); font-weight:600; }
+
   /* Idle marker: time between bars where nothing was executing — usually
      because the flow paused for user input on a form. */
   .wf-idle { display:flex; align-items:center; gap:8px; padding:1px 0; opacity:0.55; font-size:11px; }

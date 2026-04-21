@@ -248,6 +248,25 @@ function fmtMs(ms){
   return (ms/60000).toFixed(1)+'m';
 }
 
+// Group waterfall bars by their raw node TYPE (script_be_v2, api_be, …),
+// sum duration / count occurrences, and surface the friendly titles for
+// each type so you can see at a glance e.g. 'all script_be_v2 calls
+// totalled 8.2s, mean 1.6s'. Sorted slowest-total first.
+function summarizeByType(bars){
+  const m=new Map();
+  for(const b of bars){
+    if(!m.has(b.node))m.set(b.node,{name:b.node,count:0,total:0,max:0,titles:new Set()});
+    const r=m.get(b.node);
+    r.count++;
+    r.total+=b.dur;
+    if(b.dur>r.max)r.max=b.dur;
+    if(b.title)r.titles.add(b.title);
+  }
+  return [...m.values()]
+    .map(r=>({...r,mean:r.total/Math.max(1,r.count)}))
+    .sort((a,b)=>b.total-a.total);
+}
+
 // Sum gaps > 500ms between consecutive bars — these are usually times when
 // the flow paused waiting for user input on a form (callback nodes return
 // a form, then the next bar only starts when the user submits). Returns
@@ -1355,6 +1374,34 @@ function openTrace(reqId){
       ? ` · <span title="${idle.gaps.length} gap${idle.gaps.length===1?'':'s'} > 500ms — typically user input on a form or inter-request waits">active ${fmtMs(active)} · idle ${fmtMs(idle.totalMs)}</span>`
       : '';
     h+=`<div class="tp-section"><div class="tp-section-label">Timing — ${esc(f.name||'flow')} <span class="tp-exec-id">${esc(f.execId.slice(0,8))}</span> · total ${fmtMs(wf.total)}${idleHtml} · click a row to dive in</div>`;
+    // Per-type summary — answers "are all script_be_v2 calls the slow part?"
+    const typeSummary=summarizeByType(wf.bars);
+    if(typeSummary.length){
+      h+='<div class="wf-summary">';
+      h+=`<div class="wf-summary-label">Summary by type — sorted slowest total first</div>`;
+      h+=`<div class="wf-summary-row head">`
+       + `<span class="wf-summary-name">type</span>`
+       + `<span class="wf-summary-bar"></span>`
+       + `<span class="wf-summary-num">runs</span>`
+       + `<span class="wf-summary-num">mean</span>`
+       + `<span class="wf-summary-num">max</span>`
+       + `<span class="wf-summary-num">total</span>`
+       + `</div>`;
+      for(const r of typeSummary.slice(0,15)){
+        const pct=wf.total?Math.round(r.total/wf.total*100):0;
+        const titles=[...r.titles].slice(0,4).join(', ');
+        const titleAttr=titles?`${r.name} — ${titles}${r.titles.size>4?', …':''}`:r.name;
+        h+=`<div class="wf-summary-row" title="${esc(titleAttr)}">`
+         + `<span class="wf-summary-name">${esc(r.name)}</span>`
+         + `<span class="wf-summary-bar"><span class="wf-summary-fill dur-${durBucket(r.mean)}" style="width:${pct}%"></span></span>`
+         + `<span class="wf-summary-num">${r.count}</span>`
+         + `<span class="wf-summary-num dur-${durBucket(r.mean)}">${fmtMs(r.mean)}</span>`
+         + `<span class="wf-summary-num dur-${durBucket(r.max)}">${fmtMs(r.max)}</span>`
+         + `<span class="wf-summary-num dur-${durBucket(r.total)}">${fmtMs(r.total)}</span>`
+         + `</div>`;
+      }
+      h+='</div>';
+    }
     h+='<div class="wf">';
     const sortedBars=[...wf.bars].sort((a,b)=>a.start-b.start);
     for(let bi=0;bi<sortedBars.length;bi++){
