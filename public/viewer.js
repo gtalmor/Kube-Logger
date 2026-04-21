@@ -173,6 +173,37 @@ function parse(raw,i,ns){
   return{type:'raw',msg:t,level:'INFO',idx:i,raw:t,ns};
 }
 
+// Walk through `lines` chronologically and figure out the actual node ID for
+// each "in process / pre" event. The agent's logs only emit the node TYPE
+// (e.g. script_be_v2) plus the next node's ID on done; the previous node's
+// `next` IS the current node's ID. Returns Map<line.idx, nodeId>.
+function annotateNodeIds(lines) {
+  const out = new Map();
+  const nextByExec = new Map();
+  for (const l of lines) {
+    if (!l || !l.flowExecId || !l.flowState) continue;
+    const exec = l.flowExecId;
+    if (l.flowState === 'pre' || l.flowState === 'process') {
+      const id = nextByExec.get(exec);
+      if (id) out.set(l.idx, id);
+    }
+    if ((l.flowState === 'done' || l.flowState === 'post' || l.flowState === 'failed') && l.flowNext) {
+      nextByExec.set(exec, l.flowNext);
+    }
+  }
+  return out;
+}
+
+// Look up a friendly label for a node ID from any uploaded flow definition.
+// Falls back to null if we don't have a mapping; callers compose with the
+// node TYPE so something always renders.
+function nodeIdLabel(nodeId) {
+  if (!nodeId) return null;
+  const m = S.flowDefs && S.flowDefs.labels;
+  if (!m) return null;
+  return m[nodeId] || null;
+}
+
 // For each node execution (flowExecId + node), pair the earliest start state
 // (`pre`/`process`) with the matching end state (`done`/`post`/`failed`) and
 // return the wall-clock duration in ms. Used by the timeline chips, the trace
@@ -378,14 +409,21 @@ function renderNodeDetail(bar, reqId, parentExecId) {
 // { minStart, total, bars: [{node, start, dur, lineIdx, state}, ...] } or null.
 function buildWaterfall(flow){
   if(!flow||!flow.execId)return null;
-  // Pair start (pre/process) with end (done/post/failed) per node within this exec.
-  const starts=new Map(), ends=new Map();
+  // We need per-line node IDs to label the bars with friendly titles. The
+  // waterfall only sees flow.nodes (not S.lines), so look them up via S.lines
+  // when possible.
+  const allLineIds=annotateNodeIds(S.lines);
+  const starts=new Map(), ends=new Map(), nodeIdByName=new Map();
   for(const n of flow.nodes||[]){
     const t=n.ts?Date.parse(n.ts):NaN;
     if(Number.isNaN(t))continue;
     if(n.state==='pre'||n.state==='process'){
       const cur=starts.get(n.node);
-      if(cur===undefined||t<cur.t)starts.set(n.node,{t,lineIdx:n.lineIdx});
+      if(cur===undefined||t<cur.t){
+        starts.set(n.node,{t,lineIdx:n.lineIdx});
+        const id=allLineIds.get(n.lineIdx);
+        if(id&&!nodeIdByName.has(n.node))nodeIdByName.set(n.node,id);
+      }
     } else if(n.state==='done'||n.state==='post'||n.state==='failed'){
       const cur=ends.get(n.node);
       if(!cur||t>cur.t)ends.set(n.node,{t,state:n.state});
@@ -397,7 +435,9 @@ function buildWaterfall(flow){
     if(!e)continue;
     const dur=e.t-s.t;
     if(dur<0)continue;
-    bars.push({node,start:s.t,dur,lineIdx:s.lineIdx,state:e.state});
+    const id=nodeIdByName.get(node)||null;
+    const title=nodeIdLabel(id);
+    bars.push({node,title,id,start:s.t,dur,lineIdx:s.lineIdx,state:e.state});
   }
   if(!bars.length)return null;
   bars.sort((a,b)=>a.start-b.start);
@@ -430,6 +470,13 @@ function extractFlow(lines){
       nodes.push({node:nodeType,label:'Failure output not connected (#'+nc[1]+')',state:'failed',lineIdx:l.idx,reqId:l.reqId,flowExecId:fExecId,flowName:fName});}}}
   // Add script-executor errors as failed nodes in the timeline
   for(const se of scriptErrors){const k='se-'+se.lineIdx;if(!seen.has(k)){seen.add(k);nodes.push({node:'script-executor',label:se.msg,state:'failed',lineIdx:se.lineIdx});}}
+  // Annotate each node with its concrete ID (chained from the previous node's
+  // `next`) and a friendly title from any uploaded flow definition.
+  const lineIds=annotateNodeIds(lines);
+  for(const n of nodes){
+    n.id=lineIds.get(n.lineIdx)||null;
+    n.title=nodeIdLabel(n.id);
+  }
   return nodes;
 }
 
@@ -656,8 +703,10 @@ function updateFlow(){
     const bucket=dur?durBucket(dur.ms):'';
     e.className=`fnode ${n.state}${bucket?' dur-'+bucket:''}`;
     const durHtml=dur?`<span class="fnode-dur">${fmtMs(dur.ms)}</span>`:'';
-    e.innerHTML=esc(n.label||n.node)+durHtml;
-    e.title=`${n.node} (${n.state})${dur?` — ${fmtMs(dur.ms)}`:''}${n.next?' → #'+n.next:''}${n.nextLabel?' ('+n.nextLabel+')':''}${n.flowName?' | flow: '+n.flowName:''}${n.flowExecId?' | exec: '+n.flowExecId.slice(0,8):''}`;
+    // Friendly title from uploaded flow defs takes precedence over the raw node TYPE.
+    const display=n.title||n.label||n.node;
+    e.innerHTML=esc(display)+durHtml;
+    e.title=`${n.title?n.title+' • ':''}${n.node}${n.id?' #'+n.id:''} (${n.state})${dur?` — ${fmtMs(dur.ms)}`:''}${n.next?' → #'+n.next:''}${n.nextLabel?' ('+n.nextLabel+')':''}${n.flowName?' | flow: '+n.flowName:''}${n.flowExecId?' | exec: '+n.flowExecId.slice(0,8):''}`;
     e.addEventListener('click',ev=>{
       ev.stopPropagation();
       showNodePopover(e,n);
@@ -1308,9 +1357,11 @@ function openTrace(reqId){
       const offsetPct=wf.total?((b.start-wf.minStart)/wf.total*100):0;
       const widthPct=wf.total?Math.max(0.5,b.dur/wf.total*100):100;
       const detailId=`wfd-${bi}`;
-      h+=`<div class="wf-row" data-expand="${detailId}" title="${esc(b.node)} — ${fmtMs(b.dur)} (${b.state}) · click to expand">`
+      const display=b.title||b.node;
+      const titleAttr=`${b.title?b.title+' • ':''}${b.node}${b.id?' #'+b.id:''} — ${fmtMs(b.dur)} (${b.state}) · click to expand`;
+      h+=`<div class="wf-row" data-expand="${detailId}" title="${esc(titleAttr)}">`
         +`<span class="wf-caret" data-caret-for="${detailId}">▸</span>`
-        +`<span class="wf-name">${esc(b.node)}</span>`
+        +`<span class="wf-name">${esc(display)}</span>`
         +`<span class="wf-track"><span class="wf-bar dur-${durBucket(b.dur)}${b.state==='failed'?' failed':''}" style="left:${offsetPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span></span>`
         +`<span class="wf-dur">${fmtMs(b.dur)}</span>`
         +`</div>`
@@ -2228,6 +2279,129 @@ $('presetDel').addEventListener('click',()=>{
   if(!confirm(`Delete preset "${S.currentPreset}"?`))return;
   deletePreset(S.currentPreset);
 });
+
+// ── Flow definitions (uploaded JSON → friendly node names) ──────────
+// User uploads IO flow JSON; we extract nodeId → meta.title for every
+// node and merge into one big lookup. The result drives friendly labels in
+// the timeline, waterfall, and slow-node panel.
+S.flowDefs = { files: [], labels: {} };
+const FlowDefs = (() => {
+  const LS_KEY = 'kubelogger.flowDefs.v1';
+
+  function loadStored() {
+    try {
+      const j = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+      S.flowDefs.files  = Array.isArray(j.files)  ? j.files  : [];
+      S.flowDefs.labels = j.labels && typeof j.labels === 'object' ? j.labels : {};
+    } catch {}
+  }
+  function persist() {
+    try { localStorage.setItem(LS_KEY, JSON.stringify(S.flowDefs)); } catch {}
+  }
+
+  function parse(json, filename) {
+    const flow = json && (json.content || json);
+    if (!flow || !flow.nodes) return null;
+    const labels = {};
+    let count = 0;
+    for (const [id, n] of Object.entries(flow.nodes)) {
+      const title = (n.meta && n.meta.title) || n.title || '';
+      if (title) { labels[id] = title; count++; }
+    }
+    return {
+      name: json.name || flow.name || filename || 'unnamed',
+      filename: filename || '',
+      nodeCount: count,
+      labels,
+    };
+  }
+
+  function rebuildLabels() {
+    const merged = {};
+    for (const f of S.flowDefs.files) Object.assign(merged, f.labels || {});
+    S.flowDefs.labels = merged;
+  }
+
+  function add(file, labels) {
+    // Replace any prior entry with the same name (re-uploads should overwrite).
+    S.flowDefs.files = S.flowDefs.files.filter(f => f.name !== file.name);
+    S.flowDefs.files.push({ ...file, labels });
+    rebuildLabels();
+    persist();
+    render();
+    if (typeof updateFlow === 'function') { updateFlow(); }
+  }
+  function remove(idx) {
+    S.flowDefs.files.splice(idx, 1);
+    rebuildLabels();
+    persist();
+    render();
+    if (typeof updateFlow === 'function') { updateFlow(); }
+  }
+  function clear() {
+    S.flowDefs.files = []; S.flowDefs.labels = {};
+    persist();
+    render();
+    if (typeof updateFlow === 'function') { updateFlow(); }
+  }
+
+  function render() {
+    const el = $('flowDefsList'); if (!el) return;
+    if (!S.flowDefs.files.length) {
+      el.innerHTML = '<div class="sd-empty">No flow definitions loaded</div>';
+      return;
+    }
+    let h = '';
+    for (let i = 0; i < S.flowDefs.files.length; i++) {
+      const f = S.flowDefs.files[i];
+      h += `<div class="sd-item">`
+        + `<span class="sd-name" title="${esc(f.filename || f.name)}">${esc(f.name)}</span>`
+        + `<span style="color:var(--muted);font-size:10px">${f.nodeCount} nodes</span>`
+        + `<span style="color:var(--muted);cursor:pointer;padding:0 6px" data-fdrm="${i}" title="Remove">&times;</span>`
+        + `</div>`;
+    }
+    el.innerHTML = h;
+  }
+
+  if ($('flowDefsLoad')) {
+    loadStored(); render();
+    $('flowDefsLoad').addEventListener('click', () => $('flowDefsFile').click());
+    $('flowDefsFile').addEventListener('change', e => {
+      const files = [...(e.target.files || [])];
+      let added = 0, errors = [];
+      let pending = files.length;
+      if (!pending) return;
+      for (const file of files) {
+        const r = new FileReader();
+        r.onload = ev => {
+          try {
+            const json = JSON.parse(ev.target.result);
+            const parsed = parse(json, file.name);
+            if (!parsed) errors.push(`${file.name}: not a flow JSON`);
+            else { add({ name: parsed.name, filename: parsed.filename, nodeCount: parsed.nodeCount }, parsed.labels); added++; }
+          } catch (err) { errors.push(`${file.name}: ${err.message}`); }
+          if (--pending === 0) {
+            const msg = `Loaded ${added} flow${added===1?'':'s'}` + (errors.length ? ` (${errors.length} failed)` : '');
+            toast(msg);
+            if (errors.length) console.error('Flow def errors:', errors);
+            $('flowDefsFile').value = '';
+          }
+        };
+        r.readAsText(file);
+      }
+    });
+    $('flowDefsList').addEventListener('click', e => {
+      const rm = e.target.closest('[data-fdrm]'); if (!rm) return;
+      remove(parseInt(rm.dataset.fdrm, 10));
+    });
+    $('flowDefsClear').addEventListener('click', () => {
+      if (!S.flowDefs.files.length) return;
+      if (confirm('Forget all uploaded flow definitions?')) clear();
+    });
+  }
+
+  return { add, remove, clear, parse };
+})();
 
 // ── Slow-node aggregate popover ─────────────────────────────────────
 // Roll up per-node-name timing across the whole capture so patterns surface

@@ -722,6 +722,21 @@
     <button class="btn recording" id="stopBtn" style="display:none">Stop Capture</button>
     <div class="sd-capture-info" id="captureInfo"></div>
   </div>
+
+  <div class="sd-section">
+    <div class="sd-label">
+      <span>Flow Definitions</span>
+      <span class="sd-action" id="flowDefsClear" title="Forget all uploaded flow definitions">Clear all</span>
+    </div>
+    <input type="file" id="flowDefsFile" accept=".json,application/json" multiple style="display:none" />
+    <button class="btn" id="flowDefsLoad">Add JSON file(s)…</button>
+    <div class="sd-list" id="flowDefsList"><div class="sd-empty">No flow definitions loaded</div></div>
+    <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">
+      Upload IO flow JSON to translate node IDs into friendly titles
+      (e.g. <code>script_be_v2 #9191</code> → <code>CheckPasswordHealth</code>) in the timeline, trace
+      waterfall, and slow-node panel. Stored in localStorage; never sent anywhere.
+    </div>
+  </div>
 </aside>
 
 <script src="viewer.js"></script>
