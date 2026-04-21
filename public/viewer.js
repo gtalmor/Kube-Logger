@@ -2167,6 +2167,11 @@ const Drawer = (() => {
       } else {
         setCaptureState(false);
       }
+      // Fire a fresh check-auth for the remembered profile as soon as the
+      // page loads — the SSO banner should reflect reality without the user
+      // having to open the drawer. Cheap `sts get-caller-identity`.
+      const p = (m.auth && m.auth.profile) || lastProfile;
+      if (p) send({ action: 'check-auth', profile: p });
       // If authed but we have no namespace list yet, pull it so the drawer's usable immediately.
       if (authState.ok && !cachedNsList.length) send({ action: 'namespaces' });
     },
