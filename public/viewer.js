@@ -248,6 +248,23 @@ function fmtMs(ms){
   return (ms/60000).toFixed(1)+'m';
 }
 
+// Sum gaps > 500ms between consecutive bars — these are usually times when
+// the flow paused waiting for user input on a form (callback nodes return
+// a form, then the next bar only starts when the user submits). Returns
+// { totalMs, gaps: [{start, dur}] } so the caller can also visualize them.
+function summarizeIdle(bars){
+  if(!bars||bars.length<2)return{totalMs:0,gaps:[]};
+  const sorted=[...bars].sort((a,b)=>a.start-b.start);
+  const gaps=[];
+  let totalMs=0;
+  for(let i=1;i<sorted.length;i++){
+    const prevEnd=sorted[i-1].start+sorted[i-1].dur;
+    const gap=sorted[i].start-prevEnd;
+    if(gap>500){gaps.push({start:prevEnd,dur:gap});totalMs+=gap;}
+  }
+  return{totalMs,gaps};
+}
+
 // Bucket a duration into a CSS class for color coding.
 function durBucket(ms){
   if(ms<100)return 'fast';
@@ -1332,10 +1349,30 @@ function openTrace(reqId){
   for(const f of flowOrder){
     const wf=buildWaterfall(f);
     if(!wf||!wf.bars.length)continue;
-    h+=`<div class="tp-section"><div class="tp-section-label">Timing — ${esc(f.name||'flow')} <span class="tp-exec-id">${esc(f.execId.slice(0,8))}</span> · total ${fmtMs(wf.total)} · click a row to dive in</div>`;
+    const idle=summarizeIdle(wf.bars);
+    const active=Math.max(0,wf.total-idle.totalMs);
+    const idleHtml=idle.totalMs>0
+      ? ` · <span title="${idle.gaps.length} gap${idle.gaps.length===1?'':'s'} > 500ms — typically user input on a form or inter-request waits">active ${fmtMs(active)} · idle ${fmtMs(idle.totalMs)}</span>`
+      : '';
+    h+=`<div class="tp-section"><div class="tp-section-label">Timing — ${esc(f.name||'flow')} <span class="tp-exec-id">${esc(f.execId.slice(0,8))}</span> · total ${fmtMs(wf.total)}${idleHtml} · click a row to dive in</div>`;
     h+='<div class="wf">';
-    for(let bi=0;bi<wf.bars.length;bi++){
-      const b=wf.bars[bi];
+    const sortedBars=[...wf.bars].sort((a,b)=>a.start-b.start);
+    for(let bi=0;bi<sortedBars.length;bi++){
+      const b=sortedBars[bi];
+      // Insert an idle marker row when there's a gap > 500ms before this bar.
+      const prev=bi>0?sortedBars[bi-1]:null;
+      if(prev){
+        const gap=b.start-(prev.start+prev.dur);
+        if(gap>500){
+          const gapOff=wf.total?((prev.start+prev.dur-wf.minStart)/wf.total*100):0;
+          const gapW =wf.total?(gap/wf.total*100):0;
+          h+=`<div class="wf-idle" title="${fmtMs(gap)} idle — likely user input or external wait">`
+            +`<span class="wf-idle-name">⏸ idle</span>`
+            +`<span class="wf-track"><span class="wf-idle-bar" style="left:${gapOff.toFixed(2)}%;width:${gapW.toFixed(2)}%"></span></span>`
+            +`<span class="wf-dur">${fmtMs(gap)}</span>`
+            +`</div>`;
+        }
+      }
       const offsetPct=wf.total?((b.start-wf.minStart)/wf.total*100):0;
       const widthPct=wf.total?Math.max(0.5,b.dur/wf.total*100):100;
       const detailId=`wfd-${bi}`;

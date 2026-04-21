@@ -281,6 +281,17 @@
   .wf-bar.dur-slow { background:var(--error); }
   .wf-bar.failed   { background:var(--error); outline:1px solid var(--error); }
   .wf-dur { width:60px; text-align:right; color:var(--muted); font-family:'SF Mono',monospace; flex-shrink:0; }
+  /* Idle marker: time between bars where nothing was executing — usually
+     because the flow paused for user input on a form. */
+  .wf-idle { display:flex; align-items:center; gap:8px; padding:1px 0; opacity:0.55; font-size:11px; }
+  .wf-idle .wf-idle-name { width:140px; flex-shrink:0; color:var(--muted); font-family:'SF Mono',monospace; font-style:italic; }
+  .wf-idle .wf-track { flex:1; height:6px; position:relative; }
+  .wf-idle .wf-idle-bar {
+    position:absolute; top:0; bottom:0; min-width:2px; border-radius:2px;
+    background-image: repeating-linear-gradient(
+      45deg, var(--border) 0 4px, transparent 4px 8px
+    );
+  }
   .wf-caret { width:12px; color:var(--muted); font-size:10px; flex-shrink:0; user-select:none; }
   .wf-detail {
     display:none; margin:6px 0 14px 156px; padding:8px 12px;
