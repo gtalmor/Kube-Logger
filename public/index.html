@@ -122,7 +122,11 @@
   .ftl.v { display:block; }
   .ftl-label { font-size:10px; color:var(--muted); margin-bottom:4px; }
   .fnodes { display:flex; align-items:center; font-size:11px; }
-  .fnode { padding:3px 8px; border-radius:4px; cursor:pointer; white-space:nowrap; border:1px solid var(--border); background:var(--bg); margin:0 1px; }
+  .fnode { padding:3px 8px; border-radius:4px; cursor:pointer; white-space:nowrap; border:1px solid var(--border); background:var(--bg); margin:0 1px; display:inline-flex; align-items:center; gap:6px; }
+  .fnode .fnode-dur { font-size:9px; color:var(--muted); padding:1px 4px; border-radius:8px; background:rgba(255,255,255,0.04); }
+  .fnode.dur-warn .fnode-dur { color:var(--warn); background:rgba(210,153,34,0.10); }
+  .fnode.dur-slow .fnode-dur { color:var(--error); background:rgba(248,81,73,0.12); font-weight:600; }
+  .fnode.dur-fast .fnode-dur { opacity:0.55; }
   .fnode:hover { border-color:var(--accent); background:var(--bg3); }
   .fnode.done { border-color:var(--success); color:var(--success); }
   .fnode.post { border-color:var(--success); color:var(--success); }
@@ -258,6 +262,21 @@
   .tp-title { font-size:13px; font-weight:600; color:var(--bright); }
   .tp-body { flex:1; overflow-y:auto; padding:12px 0; }
 
+  /* Per-execution waterfall in the trace panel — one row per node, bar shows
+     where in the flow's timeline that node ran and how long it took. */
+  .wf { display:flex; flex-direction:column; gap:3px; }
+  .wf-row { display:flex; align-items:center; gap:8px; cursor:pointer; padding:2px 0; font-size:11px; border-radius:3px; }
+  .wf-row:hover { background:rgba(255,255,255,0.04); }
+  .wf-name { width:140px; flex-shrink:0; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:'SF Mono',monospace; }
+  .wf-track { flex:1; height:14px; position:relative; background:var(--bg); border-radius:2px; }
+  .wf-bar { position:absolute; top:0; bottom:0; border-radius:2px; min-width:2px; }
+  .wf-bar.dur-fast { background:var(--debug); }
+  .wf-bar.dur-ok   { background:var(--accent); }
+  .wf-bar.dur-warn { background:var(--warn); }
+  .wf-bar.dur-slow { background:var(--error); }
+  .wf-bar.failed   { background:var(--error); outline:1px solid var(--error); }
+  .wf-dur { width:60px; text-align:right; color:var(--muted); font-family:'SF Mono',monospace; flex-shrink:0; }
+
   .tp-section { padding:0 16px 12px; border-bottom:1px solid var(--border); margin-bottom:10px; }
   .tp-section-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; }
 
@@ -376,6 +395,26 @@
   .tri-label { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .tri-count { color:var(--muted); font-size:10px; margin-left:4px; flex-shrink:0; }
   .tri-empty { padding:12px 8px; text-align:center; color:var(--muted); font-size:11px; }
+
+  /* ── Slow-node aggregate popover ── */
+  .slow-wrap { position:relative; display:inline-block; }
+  .slow-pop {
+    display:none; position:absolute; top:calc(100% + 4px); right:0;
+    background:var(--bg2); border:1px solid var(--border); border-radius:6px;
+    padding:8px; min-width:360px; max-height:420px; overflow-y:auto; z-index:100;
+    box-shadow:0 4px 16px rgba(0,0,0,.5);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+    font-size:12px;
+  }
+  .slow-pop.v { display:block; }
+  .sl-row { display:grid; grid-template-columns: 1fr auto auto auto auto; gap:10px; padding:4px 8px; border-bottom:1px solid var(--border); align-items:center; }
+  .sl-row:last-child { border-bottom:none; }
+  .sl-row.head { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .sl-row .sl-name { font-family:'SF Mono',monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sl-row .sl-num  { color:var(--text); font-family:'SF Mono',monospace; text-align:right; min-width:50px; }
+  .sl-row .sl-num.dur-warn { color:var(--warn); }
+  .sl-row .sl-num.dur-slow { color:var(--error); font-weight:600; }
+  .sl-empty { padding:14px; color:var(--muted); text-align:center; }
 
   /* ── Palette popover (per-level colors) ── */
   .palette-wrap { position:relative; display:inline-block; }
@@ -510,6 +549,10 @@
   <div class="palette-wrap" id="paletteWrap">
     <button class="btn setup-btn" id="paletteBtn" title="Customize level colors">🎨</button>
     <div class="palette-pop" id="palettePop"></div>
+  </div>
+  <div class="slow-wrap" id="slowWrap">
+    <button class="btn setup-btn" id="slowBtn" title="Slowest nodes across the capture (mean + p95)">⏱ Slow</button>
+    <div class="slow-pop" id="slowPop"></div>
   </div>
   <div class="share-wrap" id="shareWrap">
     <button class="btn setup-btn" id="shareBtn" title="Generate a read-only invite link to share this view">⇱ Share</button>

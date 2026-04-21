@@ -173,6 +173,104 @@ function parse(raw,i,ns){
   return{type:'raw',msg:t,level:'INFO',idx:i,raw:t,ns};
 }
 
+// For each node execution (flowExecId + node), pair the earliest start state
+// (`pre`/`process`) with the matching end state (`done`/`post`/`failed`) and
+// return the wall-clock duration in ms. Used by the timeline chips, the trace
+// waterfall, and the slow-node aggregate.
+function computeNodeDurations(lines){
+  const starts=new Map();   // key → epoch ms of start
+  const ends=new Map();     // key → { ms, lineIdx, state }
+  for(const l of lines){
+    if(!l||!l.flowExecId||!l.flowNode||!l.flowState||!l.timestamp)continue;
+    const t=Date.parse(l.timestamp);
+    if(Number.isNaN(t))continue;
+    const key=l.flowExecId+'|'+l.flowNode;
+    if(l.flowState==='pre'||l.flowState==='process'){
+      const cur=starts.get(key);
+      if(cur===undefined||t<cur)starts.set(key,t);
+    } else if(l.flowState==='done'||l.flowState==='post'||l.flowState==='failed'){
+      const cur=ends.get(key);
+      if(!cur||t>cur.ms)ends.set(key,{ms:t,lineIdx:l.idx,state:l.flowState});
+    }
+  }
+  const out=new Map();
+  for(const [key,end] of ends){
+    const start=starts.get(key);
+    if(start==null)continue;
+    const ms=end.ms-start;
+    if(ms<0)continue;
+    out.set(key,{ms,startMs:start,endMs:end.ms,state:end.state});
+  }
+  return out;
+}
+
+// Aggregate per-node-name stats across the whole capture: count, mean, max, p95.
+function aggregateNodeDurations(durations){
+  const byNode=new Map(); // node name → { samples: [ms,...] }
+  for(const [key,info] of durations){
+    const name=key.split('|',2)[1]||'?';
+    if(!byNode.has(name))byNode.set(name,[]);
+    byNode.get(name).push(info.ms);
+  }
+  const rows=[];
+  for(const [name,samples] of byNode){
+    samples.sort((a,b)=>a-b);
+    const sum=samples.reduce((a,b)=>a+b,0);
+    const mean=sum/samples.length;
+    const max=samples[samples.length-1];
+    const p95=samples[Math.min(samples.length-1,Math.floor(samples.length*0.95))];
+    rows.push({name,count:samples.length,mean,max,p95,total:sum});
+  }
+  rows.sort((a,b)=>b.mean-a.mean);
+  return rows;
+}
+
+function fmtMs(ms){
+  if(ms<1000)return Math.round(ms)+'ms';
+  if(ms<60000)return (ms/1000).toFixed(ms<10000?2:1)+'s';
+  return (ms/60000).toFixed(1)+'m';
+}
+
+// Bucket a duration into a CSS class for color coding.
+function durBucket(ms){
+  if(ms<100)return 'fast';
+  if(ms<500)return 'ok';
+  if(ms<2000)return 'warn';
+  return 'slow';
+}
+
+// Build the per-execution waterfall data for one flow exec. Returns
+// { minStart, total, bars: [{node, start, dur, lineIdx, state}, ...] } or null.
+function buildWaterfall(flow){
+  if(!flow||!flow.execId)return null;
+  // Pair start (pre/process) with end (done/post/failed) per node within this exec.
+  const starts=new Map(), ends=new Map();
+  for(const n of flow.nodes||[]){
+    const t=n.ts?Date.parse(n.ts):NaN;
+    if(Number.isNaN(t))continue;
+    if(n.state==='pre'||n.state==='process'){
+      const cur=starts.get(n.node);
+      if(cur===undefined||t<cur.t)starts.set(n.node,{t,lineIdx:n.lineIdx});
+    } else if(n.state==='done'||n.state==='post'||n.state==='failed'){
+      const cur=ends.get(n.node);
+      if(!cur||t>cur.t)ends.set(n.node,{t,state:n.state});
+    }
+  }
+  const bars=[];
+  for(const [node,s] of starts){
+    const e=ends.get(node);
+    if(!e)continue;
+    const dur=e.t-s.t;
+    if(dur<0)continue;
+    bars.push({node,start:s.t,dur,lineIdx:s.lineIdx,state:e.state});
+  }
+  if(!bars.length)return null;
+  bars.sort((a,b)=>a.start-b.start);
+  const minStart=bars[0].start;
+  const maxEnd=bars.reduce((m,b)=>Math.max(m,b.start+b.dur),minStart);
+  return { minStart, total:maxEnd-minStart, bars };
+}
+
 function extractFlow(lines){
   const nodes=[],seen=new Set();
   const nr=/\[([^\]]+)\]\s+(\S+)\s+-\s+Node\s+(\S+)\s+is\s+in\s+(\w+)\s+state(?:,\s+next\s+node\s+is\s+(\S+))?/;
@@ -378,6 +476,8 @@ function updateErrBanner(){
 
 function updateFlow(){
   S.flowNodes=extractFlow(S.lines.filter(Boolean));
+  // Cache durations once per render — both the timeline and the slow-node panel use them.
+  S.nodeDurations=computeNodeDurations(S.lines);
   const c=$('fnodes'),w=$('ftl');c.innerHTML='';
   // Filter out hidden executions
   const visible=S.flowNodes.filter(n=>!n.flowExecId||!S.hiddenExecIds.has(n.flowExecId));
@@ -415,9 +515,14 @@ function updateFlow(){
       lastExec=n.flowExecId;
     }
     if(i||S.hiddenExecIds.size)c.insertAdjacentHTML('beforeend','<span class="farrow">&#8594;</span>');
-    const e=document.createElement('span');e.className=`fnode ${n.state}`;
-    e.textContent=n.label||n.node;
-    e.title=`${n.node} (${n.state})${n.next?' → #'+n.next:''}${n.nextLabel?' ('+n.nextLabel+')':''}${n.flowName?' | flow: '+n.flowName:''}${n.flowExecId?' | exec: '+n.flowExecId.slice(0,8):''}`;
+    const e=document.createElement('span');
+    // Per-node timing — pull duration if we have a matched start/end pair.
+    const dur=n.flowExecId?S.nodeDurations.get(n.flowExecId+'|'+n.node):null;
+    const bucket=dur?durBucket(dur.ms):'';
+    e.className=`fnode ${n.state}${bucket?' dur-'+bucket:''}`;
+    const durHtml=dur?`<span class="fnode-dur">${fmtMs(dur.ms)}</span>`:'';
+    e.innerHTML=esc(n.label||n.node)+durHtml;
+    e.title=`${n.node} (${n.state})${dur?` — ${fmtMs(dur.ms)}`:''}${n.next?' → #'+n.next:''}${n.nextLabel?' ('+n.nextLabel+')':''}${n.flowName?' | flow: '+n.flowName:''}${n.flowExecId?' | exec: '+n.flowExecId.slice(0,8):''}`;
     e.addEventListener('click',ev=>{
       ev.stopPropagation();
       showNodePopover(e,n);
@@ -1054,6 +1159,24 @@ function openTrace(reqId){
       h+=`<div class="tp-error-detail" data-i="${e.lineIdx}"><span class="tp-fail-icon">&#x2717;</span> ${esc(e.msg.length>200?e.msg.slice(0,200)+'...':e.msg)}</div>`;
     }
     h+='</div>';
+  }
+
+  // Per-execution timing waterfall — bar chart showing where the time went.
+  for(const f of flowOrder){
+    const wf=buildWaterfall(f);
+    if(!wf||!wf.bars.length)continue;
+    h+=`<div class="tp-section"><div class="tp-section-label">Timing — ${esc(f.name||'flow')} <span class="tp-exec-id">${esc(f.execId.slice(0,8))}</span> · total ${fmtMs(wf.total)}</div>`;
+    h+='<div class="wf">';
+    for(const b of wf.bars){
+      const offsetPct=wf.total?((b.start-wf.minStart)/wf.total*100):0;
+      const widthPct=wf.total?Math.max(0.5,b.dur/wf.total*100):100;
+      h+=`<div class="wf-row" data-i="${b.lineIdx}" title="${esc(b.node)} — ${fmtMs(b.dur)} (${b.state})">`
+        +`<span class="wf-name">${esc(b.node)}</span>`
+        +`<span class="wf-track"><span class="wf-bar dur-${durBucket(b.dur)}${b.state==='failed'?' failed':''}" style="left:${offsetPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span></span>`
+        +`<span class="wf-dur">${fmtMs(b.dur)}</span>`
+        +`</div>`;
+    }
+    h+='</div></div>';
   }
 
   // Flow execution paths
@@ -1922,6 +2045,41 @@ $('presetDel').addEventListener('click',()=>{
   deletePreset(S.currentPreset);
 });
 
+// ── Slow-node aggregate popover ─────────────────────────────────────
+// Roll up per-node-name timing across the whole capture so patterns surface
+// even when one request looks fine on its own. Re-renders each open.
+const SlowNodes = (() => {
+  function open() {
+    const rows = aggregateNodeDurations(S.nodeDurations || computeNodeDurations(S.lines));
+    let h = `<div class="sl-row head"><span>Node</span><span class="sl-num">runs</span><span class="sl-num">mean</span><span class="sl-num">p95</span><span class="sl-num">max</span></div>`;
+    if (!rows.length) {
+      h += `<div class="sl-empty">No completed node executions yet.</div>`;
+    } else {
+      for (const r of rows.slice(0, 25)) {
+        h += `<div class="sl-row" data-node="${esc(r.name)}">`
+          +  `<span class="sl-name" title="${esc(r.name)}">${esc(r.name)}</span>`
+          +  `<span class="sl-num">${r.count}</span>`
+          +  `<span class="sl-num dur-${durBucket(r.mean)}">${fmtMs(r.mean)}</span>`
+          +  `<span class="sl-num dur-${durBucket(r.p95)}">${fmtMs(r.p95)}</span>`
+          +  `<span class="sl-num dur-${durBucket(r.max)}">${fmtMs(r.max)}</span>`
+          +  `</div>`;
+      }
+    }
+    $('slowPop').innerHTML = h;
+    $('slowPop').classList.add('v');
+  }
+  function close() { $('slowPop').classList.remove('v'); }
+  if ($('slowBtn')) {
+    $('slowBtn').addEventListener('click', e => { e.stopPropagation();
+      $('slowPop').classList.contains('v') ? close() : open();
+    });
+    $('slowPop').addEventListener('click', e => e.stopPropagation());
+    document.addEventListener('click', e => { if (!e.target.closest('#slowWrap')) close(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+  }
+  return { open, close };
+})();
+
 // ── Level color palette ─────────────────────────────────────────────
 // Writes user-picked colors into CSS custom properties on :root. The line
 // backgrounds use color-mix(in srgb, var(--error) 18%, transparent) so
@@ -2032,7 +2190,7 @@ const ShareView = (() => {
           <option value="14400">4 hours</option>
           <option value="86400">1 day</option>
         </select>
-        <label><input type="checkbox" id="spOneUse" checked /> One-use</label>
+        <label title="Burns on first redeem. Only enable when you trust the share channel — link previewers (Slack, iMessage, etc.) will fetch the URL and consume the invite before you click."><input type="checkbox" id="spOneUse" /> One-use</label>
       </div>
       <button class="btn sp-btn-primary" id="spGenerate" style="margin-top:8px;width:100%">Generate invite link</button>
       <div class="sp-hint">Invitees see logs live but can't start / stop captures or change settings. Links are 128-bit random; can't be guessed.</div>
