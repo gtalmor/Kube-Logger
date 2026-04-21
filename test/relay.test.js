@@ -1,7 +1,5 @@
-// Unit tests for server/index.js — boots the relay on an ephemeral port
-// against a throwaway data dir, drives it with ws + fetch, asserts behavior.
-//
-// Run: npm test
+// Boot server/index.js on an ephemeral port + temp data dir, drive it
+// with ws + fetch, assert behavior. Run: `npm test`.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -12,21 +10,19 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const WebSocket = require('ws');
 
-const SESSION_LEN = 32;
+const TIMEOUT = 5000;
+
 const sid = () => crypto.randomBytes(16).toString('hex');
 const key = () => crypto.randomBytes(16).toString('hex');
 
 let relayProc, baseHttp, baseWs, tmpRoot;
 
-// Spawn the relay from a throwaway repo root so its `./data/` lives in /tmp.
 before(async () => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kube-logger-test-'));
   fs.mkdirSync(path.join(tmpRoot, 'server'));
   fs.mkdirSync(path.join(tmpRoot, 'public'));
   fs.copyFileSync(path.join(__dirname, '..', 'server', 'index.js'), path.join(tmpRoot, 'server', 'index.js'));
-  // Relay needs a public/ to exist for serveStatic's happy path; we don't hit it.
   fs.writeFileSync(path.join(tmpRoot, 'public', 'index.html'), '<!-- test -->');
-  // Symlink node_modules so `require('ws')` resolves.
   fs.symlinkSync(
     path.join(__dirname, '..', 'node_modules'),
     path.join(tmpRoot, 'node_modules'),
@@ -40,60 +36,52 @@ before(async () => {
     env: { ...process.env, PORT: String(port), HOST: '127.0.0.1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  relayProc.stdout.on('data', d => process.stderr.write(`[relay] ${d}`));
+  // Silence relay output by default; un-comment when debugging.
+  // relayProc.stdout.on('data', d => process.stderr.write(`[relay] ${d}`));
   relayProc.stderr.on('data', d => process.stderr.write(`[relay-err] ${d}`));
-  // Wait until /health responds.
   await waitFor(async () => (await fetch(`${baseHttp}/health`)).ok, 3000);
 });
 
 after(async () => {
-  if (relayProc) { relayProc.kill('SIGKILL'); }
+  if (relayProc) relayProc.kill('SIGKILL');
   if (tmpRoot && fs.existsSync(tmpRoot)) fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
 // ── Tests ──────────────────────────────────────────────────────────
 
-test('producer bound to session key is honored on reconnect', async () => {
+test('producer bound to session key is honored on reconnect', { timeout: TIMEOUT }, async () => {
   const session = sid();
   const k = key();
   const p1 = await openProducer(session, k);
-  await once(p1, 'open');
-  // Second producer with same key replaces the first.
+  // A second producer with the same key replaces the first.
   const p2 = await openProducer(session, k);
-  await once(p2, 'open');
-  // p1 gets closed with code 4000 'replaced by newer producer'.
-  const [code] = await once(p1, 'close');
-  assert.equal(code, 4000);
-  // Different key on the same session is rejected (401 at upgrade).
+  const closeCode = await waitForClose(p1);
+  assert.equal(closeCode, 4000, 'old producer should be closed with 4000 replaced-by-newer');
+  // Different key on the same session is rejected (401 at upgrade → 'error').
   await assert.rejects(openProducer(session, key()), /401|Unexpected server/);
   p2.close();
 });
 
-test('consumer with short session is rejected at upgrade', async () => {
-  await assert.rejects(
-    openConsumer('too-short'),
-    /400|Unexpected server/,
-  );
+test('consumer with short session is rejected at upgrade', { timeout: TIMEOUT }, async () => {
+  await assert.rejects(openConsumer('too-short'), /400|Unexpected server/);
 });
 
-test('producer log broadcasts reach all consumers on the session', async () => {
+test('producer log broadcasts reach all consumers on the session', { timeout: TIMEOUT }, async () => {
   const session = sid();
   const prod = await openProducer(session, key());
-  await once(prod, 'open');
   const c1 = await openConsumer(session);
   const c2 = await openConsumer(session);
-  // Skip relay-hello / presence / presenter-status on each consumer.
   await drainSetup(c1);
   await drainSetup(c2);
   prod.send(JSON.stringify({ type: 'log', line: 'hello', ns: 'demo', i: 0 }));
-  const [m1] = await once(c1, 'message');
-  const [m2] = await once(c2, 'message');
-  assert.equal(JSON.parse(m1).line, 'hello');
-  assert.equal(JSON.parse(m2).line, 'hello');
+  const m1 = await waitForMessage(c1, m => m.type === 'log');
+  const m2 = await waitForMessage(c2, m => m.type === 'log');
+  assert.equal(m1.line, 'hello');
+  assert.equal(m2.line, 'hello');
   prod.close(); c1.close(); c2.close();
 });
 
-test('invite create → /i/<code> → ro-token → read-only consumer', async () => {
+test('invite create → /i/<code> → ro-token → read-only consumer', { timeout: TIMEOUT }, async () => {
   const session = sid();
   const owner = await openConsumer(session);
   await drainSetup(owner);
@@ -104,16 +92,15 @@ test('invite create → /i/<code> → ro-token → read-only consumer', async ()
   const loc = res.headers.get('location') || '';
   const token = new URL(loc, baseHttp).searchParams.get('rotoken');
   assert.ok(token && token.length >= 16, `rotoken missing in ${loc}`);
-  // Consumer with rotoken gets marked read-only and receives relay-hello.
   const invitee = new WebSocket(`${baseWs}/consumer?rotoken=${encodeURIComponent(token)}`);
-  await once(invitee, 'open');
+  await waitForOpen(invitee);
   const hello = await waitForMessage(invitee, m => m.type === 'relay-hello');
   assert.equal(hello.readOnly, true);
   assert.equal(hello.session, session);
   owner.close(); invitee.close();
 });
 
-test('one-use invite burns on first redeem', async () => {
+test('one-use invite burns on first redeem', { timeout: TIMEOUT }, async () => {
   const session = sid();
   const owner = await openConsumer(session);
   await drainSetup(owner);
@@ -127,39 +114,38 @@ test('one-use invite burns on first redeem', async () => {
   owner.close();
 });
 
-test('invalid invite code returns 404', async () => {
+test('invalid invite code returns 404', { timeout: TIMEOUT }, async () => {
   const res = await fetch(`${baseHttp}/i/totally-made-up-${Date.now()}`);
   assert.equal(res.status, 404);
 });
 
-test('read-only consumer cannot start presenting', async () => {
+test('read-only consumer cannot become presenter', { timeout: TIMEOUT }, async () => {
   const session = sid();
-  // Mint an invite first so we can redeem a ro-token.
   const owner = await openConsumer(session);
   await drainSetup(owner);
+  // Mint an invite, redeem, connect as the invitee.
   owner.send(JSON.stringify({ action: 'create-invite', ttl: 900, oneUse: false }));
   const inv = await waitForMessage(owner, m => m.type === 'invite-created');
   const redirect = await fetch(`${baseHttp}${inv.path}`, { redirect: 'manual' });
   const token = new URL(redirect.headers.get('location'), baseHttp).searchParams.get('rotoken');
   const invitee = new WebSocket(`${baseWs}/consumer?rotoken=${encodeURIComponent(token)}`);
-  await once(invitee, 'open');
+  await waitForOpen(invitee);
   await drainSetup(invitee);
-  // presenter-start from an invitee should be ignored — no status reply about their presenting.
-  invitee.send(JSON.stringify({ action: 'presenter-start' }));
-  // Owner's view of presenter-status should still show presenting:false after a beat.
-  const status = await waitForMessage(owner, m => m.type === 'presenter-status', 500);
-  // If nothing matched, waitForMessage throws; getting here means a status DID arrive.
-  // We only reach here if invitee's presenter-start somehow triggered one. Verify it didn't
-  // claim the invitee as presenter (status.presenting would be true):
-  // Actually simpler: just assert that no presenter-status with presenting=true fired for 500ms.
-  assert.equal(status.presenting, false, 'invitee should not be able to become presenter');
-  owner.close(); invitee.close();
-}).catch; // swallow timeout as "correct no-op" handled below
 
-test('presenter-state fans out to followers but not to the sender', async () => {
+  // Invitee tries to claim presenter — relay should silently ignore.
+  invitee.send(JSON.stringify({ action: 'presenter-start' }));
+  // No presenter-status with presenting=true should arrive within 500ms.
+  await assert.rejects(
+    waitForMessage(owner, m => m.type === 'presenter-status' && m.presenting, 500),
+    /timeout/,
+  );
+  owner.close(); invitee.close();
+});
+
+test('presenter-state fans out to followers but not to the sender', { timeout: TIMEOUT }, async () => {
   const session = sid();
-  const owner    = await openConsumer(session);  // will be presenter
-  const follower = await openConsumer(session);
+  const owner     = await openConsumer(session);
+  const follower  = await openConsumer(session);
   const bystander = await openConsumer(session);
   await drainSetup(owner);
   await drainSetup(follower);
@@ -167,11 +153,10 @@ test('presenter-state fans out to followers but not to the sender', async () => 
 
   follower.send(JSON.stringify({ action: 'follow', following: true }));
   owner.send(JSON.stringify({ action: 'presenter-start' }));
-  // give follow + start time to settle
   await sleep(50);
   owner.send(JSON.stringify({ action: 'presenter-state', state: { search: 'hi' } }));
 
-  const got = await waitForMessage(follower, m => m.type === 'presenter-state', 500);
+  const got = await waitForMessage(follower, m => m.type === 'presenter-state', 800);
   assert.equal(got.state.search, 'hi');
 
   // Bystander (not following) shouldn't have received presenter-state.
@@ -180,6 +165,32 @@ test('presenter-state fans out to followers but not to the sender', async () => 
     /timeout/,
   );
   owner.close(); follower.close(); bystander.close();
+});
+
+test('kick-invitees revokes invites and closes invitee sockets', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const owner = await openConsumer(session);
+  await drainSetup(owner);
+  owner.send(JSON.stringify({ action: 'create-invite', ttl: 900, oneUse: false }));
+  const inv = await waitForMessage(owner, m => m.type === 'invite-created');
+  const redirect = await fetch(`${baseHttp}${inv.path}`, { redirect: 'manual' });
+  const token = new URL(redirect.headers.get('location'), baseHttp).searchParams.get('rotoken');
+  const invitee = new WebSocket(`${baseWs}/consumer?rotoken=${encodeURIComponent(token)}`);
+  await waitForOpen(invitee);
+  await drainSetup(invitee);
+
+  owner.send(JSON.stringify({ action: 'kick-invitees' }));
+
+  const ack = await waitForMessage(owner, m => m.type === 'kicked');
+  assert.ok(ack.kicked >= 1, 'should report at least one socket kicked');
+  assert.ok(ack.revokedInvites >= 1, 'should report at least one invite revoked');
+  // Invitee socket is force-closed by the relay.
+  const code = await waitForClose(invitee);
+  assert.equal(code, 4001);
+  // The original invite no longer redeems.
+  const after = await fetch(`${baseHttp}${inv.path}`, { redirect: 'manual' });
+  assert.equal(after.status, 404);
+  owner.close();
 });
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -196,6 +207,8 @@ function getFreePort() {
   });
 }
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 async function waitFor(fn, ms) {
   const until = Date.now() + ms;
   let lastErr;
@@ -206,49 +219,46 @@ async function waitFor(fn, ms) {
   throw lastErr || new Error('waitFor timed out');
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function once(ws, evt) {
+// Open helpers — resolve only after 'open', reject on first 'error'.
+function waitForOpen(ws, ms = 2000) {
   return new Promise((resolve, reject) => {
-    const ok   = (...a) => { cleanup(); resolve(a); };
-    const fail = e      => { cleanup(); reject(e); };
-    function cleanup() {
-      ws.off(evt, ok);
-      if (evt !== 'error') ws.off('error', fail);
-    }
-    ws.once(evt, ok);
-    if (evt !== 'error') ws.once('error', fail);
+    if (ws.readyState === 1) return resolve(ws);
+    const t = setTimeout(() => { cleanup(); reject(new Error('open timeout')); }, ms);
+    function cleanup() { clearTimeout(t); ws.off('open', ok); ws.off('error', err); }
+    function ok()    { cleanup(); resolve(ws); }
+    function err(e)  { cleanup(); reject(e); }
+    ws.once('open', ok);
+    ws.once('error', err);
   });
 }
 
 function openProducer(session, keyVal) {
-  return new Promise((resolve, reject) => {
-    const url = `${baseWs}/producer?session=${encodeURIComponent(session)}&key=${encodeURIComponent(keyVal)}`;
-    const ws = new WebSocket(url);
-    ws.once('open', () => resolve(ws));
-    ws.once('error', reject);
-  });
+  const url = `${baseWs}/producer?session=${encodeURIComponent(session)}&key=${encodeURIComponent(keyVal)}`;
+  return waitForOpen(new WebSocket(url));
 }
 
 function openConsumer(session) {
+  const url = `${baseWs}/consumer?session=${encodeURIComponent(session)}`;
+  return waitForOpen(new WebSocket(url));
+}
+
+function waitForClose(ws, ms = 2000) {
   return new Promise((resolve, reject) => {
-    const url = `${baseWs}/consumer?session=${encodeURIComponent(session)}`;
-    const ws = new WebSocket(url);
-    ws.once('open', () => resolve(ws));
-    ws.once('error', reject);
+    if (ws.readyState === 3) return resolve(0);
+    const t = setTimeout(() => { ws.off('close', cb); reject(new Error('close timeout')); }, ms);
+    function cb(code) { clearTimeout(t); resolve(code); }
+    ws.once('close', cb);
   });
 }
 
-// Absorb the initial burst of setup messages (relay-hello, presence, presenter-status).
-async function drainSetup(ws) {
-  const deadline = Date.now() + 200;
-  await new Promise(resolve => {
-    const onMsg = raw => {
-      const m = JSON.parse(raw.toString());
-      if (Date.now() >= deadline) { ws.off('message', onMsg); resolve(); }
-    };
+// Eat the burst of setup messages (relay-hello, presence, presenter-status)
+// the relay sends on consumer connect, so per-test waitForMessage gets the
+// next *real* message rather than these.
+function drainSetup(ws, ms = 200) {
+  return new Promise(resolve => {
+    const onMsg = () => {};
     ws.on('message', onMsg);
-    setTimeout(() => { ws.off('message', onMsg); resolve(); }, 200);
+    setTimeout(() => { ws.off('message', onMsg); resolve(); }, ms);
   });
 }
 
