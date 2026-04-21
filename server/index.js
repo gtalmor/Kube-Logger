@@ -41,7 +41,7 @@ const sessions = new Map();
 
 function getOrCreateSession(id) {
   let s = sessions.get(id);
-  if (!s) { s = { producer: null, producerKey: null, consumers: new Set(), startedAt: Date.now() }; sessions.set(id, s); }
+  if (!s) { s = { producer: null, producerKey: null, consumers: new Set(), presenter: null, startedAt: Date.now() }; sessions.set(id, s); }
   return s;
 }
 
@@ -268,6 +268,8 @@ wss.on('connection', ws => {
 
   // consumer
   ws.idle = false;
+  ws.following = false;
+  ws.presenting = false;
   s.consumers.add(ws);
   log(ws.session, `consumer connected (producer: ${s.producer ? 'yes' : 'no'}, readOnly: ${ws.readOnly}, total: ${s.consumers.size})`);
 
@@ -278,13 +280,31 @@ wss.on('connection', ws => {
     readOnly: ws.readOnly,
   }));
   broadcastPresence(s);
+  safeSend(ws, JSON.stringify({
+    type: 'presenter-status',
+    presenting: !!s.presenter,
+    followers: [...s.consumers].filter(c => c.following).length,
+  }));
 
   ws.on('message', buf => {
     const raw = buf.toString();
     let m = null;
     try { m = JSON.parse(raw); } catch {}
-    // Presence bookkeeping is allowed from any consumer, including invitees.
+    // Bookkeeping actions are allowed from any consumer, including invitees.
     if (m && m.action === 'presence') { ws.idle = !!m.idle; broadcastPresence(s); return; }
+    if (m && m.action === 'follow')   { ws.following = !!m.following; broadcastPresenterStatus(s); return; }
+    // Presenter-state follows: invitees can receive but not emit, even in presenter mode.
+    if (!ws.readOnly && m && m.action === 'presenter-start') {
+      s.presenter = ws; ws.presenting = true; broadcastPresenterStatus(s); return;
+    }
+    if (!ws.readOnly && m && m.action === 'presenter-stop') {
+      if (s.presenter === ws) s.presenter = null;
+      ws.presenting = false; broadcastPresenterStatus(s); return;
+    }
+    if (!ws.readOnly && m && m.action === 'presenter-state' && ws.presenting) {
+      fanoutPresenterState(s, ws, m.state);
+      return;
+    }
     // Everything else from invitees is dropped.
     if (ws.readOnly) return;
     if (m && m.action === 'create-invite') { handleCreateInvite(ws, m); return; }
@@ -295,11 +315,33 @@ wss.on('connection', ws => {
   ws.on('close', () => {
     s.consumers.delete(ws);
     log(ws.session, `consumer disconnected (remaining: ${s.consumers.size})`);
+    if (s.presenter === ws) { s.presenter = null; broadcastPresenterStatus(s); }
     broadcastPresence(s);
     dropIfEmpty(ws.session);
   });
   ws.on('error', e => log(ws.session, `consumer error: ${e.message}`));
 });
+
+function broadcastPresenterStatus(s) {
+  let followers = 0;
+  for (const c of s.consumers) if (c.following) followers++;
+  const payload = JSON.stringify({
+    type: 'presenter-status',
+    presenting: !!s.presenter,
+    followers,
+  });
+  for (const c of s.consumers) if (c.readyState === 1) { try { c.send(payload); } catch {} }
+}
+
+function fanoutPresenterState(s, sender, state) {
+  const payload = JSON.stringify({ type: 'presenter-state', state });
+  for (const c of s.consumers) {
+    if (c === sender) continue;
+    if (!c.following) continue;
+    if (c.readyState !== 1) continue;
+    try { c.send(payload); } catch {}
+  }
+}
 
 function broadcastPresence(s) {
   let owners = 0, invitees = 0, active = 0, idle = 0;

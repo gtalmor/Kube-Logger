@@ -634,6 +634,7 @@ function jumpErr(dir){
   if(!S.errIdx.length){toast('No errors');return;}
   S.curErr=dir==='next'?(S.curErr+1)%S.errIdx.length:S.curErr<=0?S.errIdx.length-1:S.curErr-1;
   scrollTo(S.errIdx[S.curErr]);toast(`Error ${S.curErr+1}/${S.errIdx.length}`);
+  if(typeof presentNow==='function')presentNow({scrollToIdx:S.errIdx[S.curErr]});
 }
 
 function toast(m){const e=$('toast');e.textContent=m;e.classList.add('v');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('v'),2500);}
@@ -1301,6 +1302,12 @@ function connect(){
       case'presence':
         renderPresence(m.counts);
         break;
+      case'presenter-status':
+        onPresenterStatus(m);
+        break;
+      case'presenter-state':
+        if(S.following)applyPresenterState(m.state);
+        break;
       case'invite-created':
         ShareView.onInviteCreated(m);
         break;
@@ -1447,6 +1454,99 @@ function renderPresence(counts){
   el.title=`owners: ${counts.owners}, invitees: ${counts.invitees}, active: ${counts.active}, idle: ${counts.idle}`;
   el.style.display='';
 }
+
+// ── Follow-the-leader (presenter mode) ─────────────────────────────
+// Owner toggles Present; their search / filters / jump-to-line are broadcast.
+// Any consumer (owner or invitee) can toggle Follow to apply incoming state.
+S.presenting = false;
+S.following  = false;
+
+function onPresenterStatus(m) {
+  const presenting = !!m.presenting;
+  // Follow button is only meaningful when someone is actually presenting —
+  // if that ends and we were following, drop the flag too.
+  if (!presenting && S.following) { S.following = false; toast('Presenter ended'); }
+  // Followers-count badge on the Present button (owner only).
+  if (S.presenting) {
+    $('presentBtn').textContent = m.followers ? `🫱 Presenting · ${m.followers}` : '🫱 Presenting · 0';
+  }
+  const fb = $('followBtn');
+  // Hide Follow button entirely when nobody's presenting.
+  fb.style.display = presenting ? '' : 'none';
+  fb.textContent   = S.following ? '👀 Following' : '👀 Follow';
+  fb.classList.toggle('active', S.following);
+}
+
+// Debounced broadcast of the driving state. Some events (scroll-to-line) bypass
+// the debounce and go out immediately so followers feel the jump in real time.
+let _presentTimer = null;
+function snapshotState(extra) {
+  return {
+    search: S.search,
+    level: {...S.level}, pod: {...S.pod}, req: {...S.req},
+    hideTrace: !!S.hideTrace,
+    ...(extra || {}),
+  };
+}
+function presentSoon() {
+  if (!S.presenting) return;
+  if (_presentTimer) return;
+  _presentTimer = setTimeout(() => {
+    _presentTimer = null;
+    send({ action: 'presenter-state', state: snapshotState() });
+  }, 180);
+}
+function presentNow(extra) {
+  if (!S.presenting) return;
+  if (_presentTimer) { clearTimeout(_presentTimer); _presentTimer = null; }
+  send({ action: 'presenter-state', state: snapshotState(extra) });
+}
+
+function applyPresenterState(state) {
+  if (!state) return;
+  if (state.search !== undefined) { S.search = state.search; $('searchInput').value = state.search; }
+  if (state.level) { S.level = {...state.level}; refreshTri('level'); }
+  if (state.pod)   { S.pod   = {...state.pod};   refreshTri('pod');   }
+  if (state.req)   { S.req   = {...state.req};   refreshTri('req');   }
+  if (state.hideTrace !== undefined) {
+    S.hideTrace = !!state.hideTrace;
+    const b = $('hideTrace');
+    b.classList.toggle('active', S.hideTrace);
+    b.textContent = S.hideTrace ? 'Show TRACE' : 'Hide TRACE';
+  }
+  rebuildFiltered(); fullRender();
+  if (state.scrollToIdx !== undefined && Number.isInteger(state.scrollToIdx)) {
+    scrollTo(state.scrollToIdx);
+  }
+}
+
+// Only non-read-only consumers get a Present button.
+if (!RO_TOKEN) {
+  $('presentBtn').style.display = '';
+  $('presentBtn').textContent = '🫱 Present';
+  $('presentBtn').addEventListener('click', () => {
+    S.presenting = !S.presenting;
+    const b = $('presentBtn');
+    b.classList.toggle('active', S.presenting);
+    if (S.presenting) {
+      b.textContent = '🫱 Presenting · 0';
+      send({ action: 'presenter-start' });
+      // Push an initial snapshot so followers immediately match my view.
+      presentNow();
+    } else {
+      b.textContent = '🫱 Present';
+      send({ action: 'presenter-stop' });
+    }
+  });
+}
+
+$('followBtn').addEventListener('click', () => {
+  S.following = !S.following;
+  const b = $('followBtn');
+  b.classList.toggle('active', S.following);
+  b.textContent = S.following ? '👀 Following' : '👀 Follow';
+  send({ action: 'follow', following: S.following });
+});
 
 if($('ssoRelogin')){
   $('ssoRelogin').addEventListener('click',()=>{
@@ -1600,7 +1700,7 @@ $('ipBody').addEventListener('click',e=>{
   }
 });
 
-let sto;$('searchInput').addEventListener('input',e=>{clearTimeout(sto);sto=setTimeout(()=>{S.search=e.target.value.trim();rebuildFiltered();fullRender();},200);});
+let sto;$('searchInput').addEventListener('input',e=>{clearTimeout(sto);sto=setTimeout(()=>{S.search=e.target.value.trim();rebuildFiltered();fullRender();presentSoon();},200);});
 // Tri-state filter wiring: button toggles the popover, row clicks cycle state.
 // Outside-click or Escape closes the popover.
 (function wireTriFilters(){
@@ -1618,17 +1718,17 @@ let sto;$('searchInput').addEventListener('input',e=>{clearTimeout(sto);sto=setT
     $(`${name}Btn`).addEventListener('click',e=>{e.stopPropagation();toggle(name);});
     $(`${name}Pop`).addEventListener('click',e=>{
       e.stopPropagation();
-      if(e.target.closest('.tri-pop-clear')){triClear(filters[name]);refreshTri(name);rebuildFiltered();fullRender();return;}
+      if(e.target.closest('.tri-pop-clear')){triClear(filters[name]);refreshTri(name);rebuildFiltered();fullRender();presentSoon();return;}
       const row=e.target.closest('.tri-row');
       if(!row)return;
       triCycle(filters[name],row.dataset.value);
-      refreshTri(name);rebuildFiltered();fullRender();
+      refreshTri(name);rebuildFiltered();fullRender();presentSoon();
     });
   }
   document.addEventListener('click',e=>{if(!e.target.closest('.tri-filter'))closeAll();});
   document.addEventListener('keydown',e=>{if(e.key==='Escape')closeAll();});
 })();
-$('hideTrace').addEventListener('click',e=>{S.hideTrace=!S.hideTrace;e.target.classList.toggle('active',S.hideTrace);e.target.textContent=S.hideTrace?'Show TRACE':'Hide TRACE';rebuildFiltered();fullRender();});
+$('hideTrace').addEventListener('click',e=>{S.hideTrace=!S.hideTrace;e.target.classList.toggle('active',S.hideTrace);e.target.textContent=S.hideTrace?'Show TRACE':'Hide TRACE';rebuildFiltered();fullRender();presentSoon();});
 $('hiddenBtn').addEventListener('click',e=>{e.stopPropagation();showHiddenPanel();});
 $('highlightBtn').addEventListener('click',e=>{e.stopPropagation();showHighlightPanel();});
 $('autoScroll').addEventListener('click',e=>{
@@ -1686,9 +1786,9 @@ $('errList').addEventListener('click',e=>{
   const row=e.target.closest('.err-row');if(!row)return;
   const idx=parseInt(row.dataset.jump,10);
   if(!Number.isNaN(idx)){
-    // Keep prev/next cursor in sync so ▲/▼ Err resume from where you jumped.
     const pos=S.errIdx.indexOf(idx);if(pos>=0)S.curErr=pos;
     scrollTo(idx);
+    if(typeof presentNow==='function')presentNow({scrollToIdx:idx});
   }
   $('errList').classList.remove('v');
 });
