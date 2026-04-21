@@ -1618,13 +1618,13 @@ document.addEventListener('visibilitychange',sendPresence);
 
 function renderPresence(counts){
   const el=$('presencePill');if(!el||!counts)return;
-  // Hide the pill when there's nothing interesting to show (just you).
-  if(counts.total<=1&&counts.invitees===0){el.style.display='none';return;}
-  const bits=[`👥 ${counts.total} viewing`];
+  // Counts arrive already-self-subtracted from the relay — hide if nobody else is here.
+  if(counts.total<=0){el.style.display='none';return;}
+  const bits=[`👥 ${counts.total} other${counts.total===1?'':'s'} viewing`];
   if(counts.invitees)bits.push(`<span class="pp-sep">·</span> ${counts.invitees} invitee${counts.invitees===1?'':'s'}`);
   if(counts.idle)    bits.push(`<span class="pp-sep">·</span> <span class="pp-idle">${counts.idle} idle</span>`);
   el.innerHTML=bits.join(' ');
-  el.title=`owners: ${counts.owners}, invitees: ${counts.invitees}, active: ${counts.active}, idle: ${counts.idle}`;
+  el.title=`others viewing — owners: ${counts.owners}, invitees: ${counts.invitees}, active: ${counts.active}, idle: ${counts.idle}`;
   el.style.display='';
 }
 

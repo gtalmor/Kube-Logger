@@ -369,16 +369,27 @@ function fanoutPresenterState(s, sender, state) {
 }
 
 function broadcastPresence(s) {
-  let owners = 0, invitees = 0, active = 0, idle = 0;
+  let owners = 0, invitees = 0, idle = 0;
   for (const c of s.consumers) {
     if (c.readOnly) invitees++; else owners++;
-    if (c.idle) idle++; else active++;
+    if (c.idle) idle++;
   }
-  const payload = JSON.stringify({
-    type: 'presence',
-    counts: { total: owners + invitees, owners, invitees, active, idle },
-  });
-  for (const c of s.consumers) if (c.readyState === 1) { try { c.send(payload); } catch {} }
+  const totalAll = owners + invitees;
+  // Each viewer sees a count of *other* viewers — not themselves. Otherwise
+  // a solo session always shows "1 viewing · 0 idle" which is just confusing.
+  for (const c of s.consumers) {
+    if (c.readyState !== 1) continue;
+    const selfOwner = !c.readOnly;
+    const selfIdle  = !!c.idle;
+    const counts = {
+      total:    totalAll - 1,
+      owners:   owners   - (selfOwner ? 1 : 0),
+      invitees: invitees - (selfOwner ? 0 : 1),
+      idle:     idle     - (selfIdle  ? 1 : 0),
+    };
+    counts.active = counts.total - counts.idle;
+    try { c.send(JSON.stringify({ type: 'presence', counts })); } catch {}
+  }
 }
 
 // ── Invite handlers (invoked from an owner's consumer socket) ───────
