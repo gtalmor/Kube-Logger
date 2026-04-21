@@ -17,6 +17,44 @@ const { version: VERSION } = require('../package.json');
 // config file written). Useful for `brew list --versions` cross-checks and
 // for re-opening the viewer tab against a background-running agent.
 const _cli = process.argv.slice(2);
+if (_cli.some(a => a === '--help' || a === '-h')) {
+  console.log(`kube-logger-agent ${VERSION}
+
+  Streams Kubernetes logs from this machine to https://logviewer.gtalmor.com.
+
+USAGE
+  kube-logger-agent [flags]
+
+FLAGS
+  -h, --help           Show this help and exit.
+  -v, --version        Print version + platform and exit.
+  -o, --open           Print the viewer URL for the persisted session and
+                       open it in your default browser, then exit. Useful
+                       when the agent is already running in the background.
+      --new-session    Wipe ~/.kube-logger/session + producer-key, generate
+      --rotate         fresh ones, and continue normal startup. Invalidates
+                       any existing viewer URL or invite link.
+
+ENVIRONMENT
+  KUBE_LOGGER_RELAY            Override the relay endpoint (default:
+                               https://logviewer.gtalmor.com). Useful for
+                               pointing at a local relay for testing.
+  KUBE_LOGGER_NO_BROWSER=1     Don't auto-open the viewer on boot.
+  KUBE_LOGGER_NO_UPDATE_CHECK=1
+                               Skip the GitHub release check.
+  KUBE_LOGGER_FORCE=1          In non-TTY runs, take over an existing agent
+                               instead of refusing to start.
+
+FILES
+  ~/.kube-logger/session       Persisted 32-char session id (in viewer URL).
+  ~/.kube-logger/producer-key  Per-machine secret binding this agent to the
+                               session at the relay.
+  ~/.kube-logger/config.json   Region + AWS-profile-to-EKS-cluster map +
+                               disabled profile list. Edit by hand.
+  ~/.kube-logger/agent.pid     PID of the live agent on this machine.
+`);
+  process.exit(0);
+}
 if (_cli.some(a => a === '--version' || a === '-v')) {
   console.log(`kube-logger-agent ${VERSION} (${process.platform}-${process.arch})`);
   process.exit(0);
@@ -518,6 +556,15 @@ function stopCapture() {
   const result = { ns: nsList, start, end: Date.now(), n: lines.length };
   capture = null;
   return result;
+}
+
+// `--new-session` / `--rotate` wipes the persisted session id + producer key
+// so this run (and every future run) gets fresh ones. The previous viewer URL
+// becomes useless — anyone holding it lands on "Waiting for agent…".
+if (_cli.some(a => a === '--new-session' || a === '--rotate')) {
+  try { fs.unlinkSync(SESSION_FILE); } catch {}
+  try { fs.unlinkSync(PRODUCER_KEY_FILE); } catch {}
+  console.log('  Session rotated — old viewer URL is now invalid.');
 }
 
 // Booted lazily so we can prompt about a duplicate agent before claiming
