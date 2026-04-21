@@ -195,6 +195,15 @@ function connectSaas() {
   ws.on('close', (code, reason) => {
     console.log(`[saas] disconnected (code ${code}, reason: ${reason || 'n/a'})`);
     if (saasProducer === ws) saasProducer = null;
+    // Code 4000 = the relay kicked us because a newer agent (same session+key)
+    // claimed the session. Reconnecting would just kick that one back — endless
+    // ping-pong. Bail loudly so the user can stop the duplicate.
+    if (code === 4000) {
+      console.error(`\n  Another agent has taken over this session.`);
+      console.error(`  Likely you have a duplicate kube-logger-agent running. Find it:`);
+      console.error(`    pgrep -af kube-logger-agent\n`);
+      process.exit(1);
+    }
     if (saasTarget && !saasReconnectTimer) {
       saasReconnectTimer = setTimeout(() => { saasReconnectTimer = null; connectSaas(); }, 3000);
     }
