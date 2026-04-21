@@ -62,20 +62,6 @@ const _ext = (() => {
     runtime: { sendMessage() {} },
   };
 })();
-// One-time migration from the old `io-*` localStorage keys.
-(function migrateStorageKeys(){
-  const map = {
-    'io-hidden-patterns': 'kube-logger-hidden-patterns',
-    'io-highlights':      'kube-logger-highlights',
-    'io-last-ns':         'kube-logger-last-ns',
-  };
-  for (const [oldK, newK] of Object.entries(map)) {
-    const v = localStorage.getItem(oldK);
-    if (v === null) continue;
-    if (localStorage.getItem(newK) === null) localStorage.setItem(newK, v);
-    localStorage.removeItem(oldK);
-  }
-})();
 const HIDDEN_KEY='kube-logger-hidden-patterns';
 const HIGHLIGHT_KEY='kube-logger-highlights';
 const PRESETS_KEY='kube-logger-filter-presets';
@@ -2281,7 +2267,7 @@ $('presetDel').addEventListener('click',()=>{
 });
 
 // ── Flow definitions (uploaded JSON → friendly node names) ──────────
-// User uploads IO flow JSON; we extract nodeId → meta.title for every
+// User uploads IO (Identity Orchestrator) flow JSON; we extract nodeId → meta.title for every
 // node and merge into one big lookup. The result drives friendly labels in
 // the timeline, waterfall, and slow-node panel.
 S.flowDefs = { files: [], labels: {} };
