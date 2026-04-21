@@ -395,35 +395,31 @@ function renderNodeDetail(bar, reqId, parentExecId) {
 // { minStart, total, bars: [{node, start, dur, lineIdx, state}, ...] } or null.
 function buildWaterfall(flow){
   if(!flow||!flow.execId)return null;
-  // We need per-line node IDs to label the bars with friendly titles. The
-  // waterfall only sees flow.nodes (not S.lines), so look them up via S.lines
-  // when possible.
+  // Each (node TYPE) might appear multiple times across the trace, so we must
+  // key starts/ends by lineIdx of the start line, not by node name. That way
+  // we get a separate bar (with its own real node ID and friendly title) for
+  // every distinct execution rather than collapsing them all into one.
   const allLineIds=annotateNodeIds(S.lines);
-  const starts=new Map(), ends=new Map(), nodeIdByName=new Map();
-  for(const n of flow.nodes||[]){
-    const t=n.ts?Date.parse(n.ts):NaN;
+  const bars=[];
+  // Match each `pre`/`process` start with the closest subsequent
+  // `done`/`post`/`failed` for the SAME node TYPE within this flow exec.
+  const events=(flow.nodes||[]).filter(n=>n.ts).slice().sort((a,b)=>(Date.parse(a.ts)||0)-(Date.parse(b.ts)||0));
+  const open=new Map(); // node TYPE → { t, lineIdx }
+  for(const n of events){
+    const t=Date.parse(n.ts);
     if(Number.isNaN(t))continue;
     if(n.state==='pre'||n.state==='process'){
-      const cur=starts.get(n.node);
-      if(cur===undefined||t<cur.t){
-        starts.set(n.node,{t,lineIdx:n.lineIdx});
-        const id=allLineIds.get(n.lineIdx);
-        if(id&&!nodeIdByName.has(n.node))nodeIdByName.set(n.node,id);
-      }
+      // If we already have an open bar for this node type, close it as
+      // truncated (rare — defensive against missing done lines).
+      open.set(n.node,{t,lineIdx:n.lineIdx});
     } else if(n.state==='done'||n.state==='post'||n.state==='failed'){
-      const cur=ends.get(n.node);
-      if(!cur||t>cur.t)ends.set(n.node,{t,state:n.state});
+      const s=open.get(n.node);
+      if(!s)continue;
+      open.delete(n.node);
+      const id=allLineIds.get(s.lineIdx)||null;
+      const title=nodeIdLabel(id);
+      bars.push({node:n.node,title,id,start:s.t,dur:t-s.t,lineIdx:s.lineIdx,state:n.state});
     }
-  }
-  const bars=[];
-  for(const [node,s] of starts){
-    const e=ends.get(node);
-    if(!e)continue;
-    const dur=e.t-s.t;
-    if(dur<0)continue;
-    const id=nodeIdByName.get(node)||null;
-    const title=nodeIdLabel(id);
-    bars.push({node,title,id,start:s.t,dur,lineIdx:s.lineIdx,state:e.state});
   }
   if(!bars.length)return null;
   bars.sort((a,b)=>a.start-b.start);

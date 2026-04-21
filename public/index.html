@@ -288,6 +288,11 @@
     font-size:11px;
   }
   .wf-detail.v { display:block; }
+  /* Nested expansion: don't keep adding 156px of left margin per level — by
+     the third level the panel runs off-screen. Indent modestly relative to
+     the parent detail. */
+  .wf-detail .wf-detail { margin-left:14px; }
+  .wf-detail .wf-name { width:auto; min-width:120px; }
   .wf-d-section { margin-bottom:8px; }
   .wf-d-section:last-child { margin-bottom:0; }
   .wf-d-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.4px; margin-bottom:4px; }
