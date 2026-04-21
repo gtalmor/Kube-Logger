@@ -50,6 +50,32 @@ const CONFIG_DIR = path.join(os.homedir(), '.kube-logger');
 const SESSION_FILE = path.join(CONFIG_DIR, 'session');
 const PRODUCER_KEY_FILE = path.join(CONFIG_DIR, 'producer-key');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+const PID_FILE = path.join(CONFIG_DIR, 'agent.pid');
+
+// Returns the PID of an already-running agent on this machine, or null.
+function existingAgentPid() {
+  try {
+    const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+    if (!pid || Number.isNaN(pid) || pid === process.pid) return null;
+    try { process.kill(pid, 0); return pid; } catch { return null; }
+  } catch { return null; }
+}
+
+function writePidFile() {
+  try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(PID_FILE, String(process.pid), { mode: 0o600 });
+  } catch {}
+  const cleanup = () => {
+    try {
+      const pid = fs.readFileSync(PID_FILE, 'utf8').trim();
+      if (pid === String(process.pid)) fs.unlinkSync(PID_FILE);
+    } catch {}
+  };
+  process.on('exit', cleanup);
+  process.on('SIGINT',  () => process.exit(0));
+  process.on('SIGTERM', () => process.exit(0));
+}
 
 // Read a 16-byte hex secret from `file`, or generate and persist a new one.
 // Used for both the session id (public — in the viewer URL) and the producer
@@ -494,16 +520,66 @@ function stopCapture() {
   return result;
 }
 
-const SESSION_ID = loadOrCreateSession();
-const PRODUCER_KEY = loadOrCreateProducerKey();
-const VIEWER_URL = `${RELAY_HTTP_URL}/?session=${SESSION_ID}`;
+// Booted lazily so we can prompt about a duplicate agent before claiming
+// the session file. Module-level so the rest of the file can close over them.
+let SESSION_ID = '';
+let PRODUCER_KEY = '';
+let VIEWER_URL = '';
 
-const clusterCount = Object.keys(CFG.clusters).length;
-console.log(`\n  Kube Logger Agent v${VERSION}`);
-console.log(`  Tool: ${LOG_TOOL} | Region: ${CFG.region} | Clusters configured: ${clusterCount || `0 — edit ${CONFIG_FILE}`}`);
-console.log(`  Viewer: ${VIEWER_URL}\n`);
+// If another kube-logger-agent is already running on this machine, ask the
+// user what to do — kill it, take over with a fresh session, or quit. Avoids
+// the relay-side ping-pong that older builds could fall into.
+async function promptDuplicateAgent() {
+  const pid = existingAgentPid();
+  if (!pid) return { freshSession: false };
+  if (!process.stdin.isTTY) {
+    console.error(`\n  Another kube-logger-agent is already running (PID ${pid}).`);
+    console.error(`  Stop it first or pass KUBE_LOGGER_FORCE=1 to take over.\n`);
+    if (!process.env.KUBE_LOGGER_FORCE) process.exit(1);
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+    await new Promise(r => setTimeout(r, 1500));
+    return { freshSession: false };
+  }
+  const readline = require('readline');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ans = await new Promise(resolve => {
+    rl.question(
+      `\n  Another kube-logger-agent is already running (PID ${pid}).\n` +
+      `    [k] kill it and take over (keep my session URL)\n` +
+      `    [n] new session (this run only — won't touch your saved session)\n` +
+      `    [q] quit\n  > `,
+      a => { rl.close(); resolve((a || '').trim().toLowerCase()); }
+    );
+  });
+  if (ans === 'k') {
+    try { process.kill(pid, 'SIGTERM'); console.log(`  Sent SIGTERM to PID ${pid}.`); }
+    catch (e) { console.error(`  Failed to kill PID ${pid}: ${e.message}`); process.exit(1); }
+    await new Promise(r => setTimeout(r, 1500));
+    return { freshSession: false };
+  }
+  if (ans === 'n') return { freshSession: true };
+  process.exit(0);
+}
 
-setSaasTarget(RELAY_WS_URL, SESSION_ID);
+(async function start() {
+  const { freshSession } = await promptDuplicateAgent();
+  if (freshSession) {
+    SESSION_ID = crypto.randomBytes(16).toString('hex');
+    PRODUCER_KEY = crypto.randomBytes(16).toString('hex');
+    console.log(`  Using a fresh in-memory session (won't overwrite ~/.kube-logger/session).`);
+  } else {
+    SESSION_ID = loadOrCreateSession();
+    PRODUCER_KEY = loadOrCreateProducerKey();
+  }
+  VIEWER_URL = `${RELAY_HTTP_URL}/?session=${SESSION_ID}`;
+  writePidFile();
+
+  const clusterCount = Object.keys(CFG.clusters).length;
+  console.log(`\n  Kube Logger Agent v${VERSION}`);
+  console.log(`  Tool: ${LOG_TOOL} | Region: ${CFG.region} | Clusters configured: ${clusterCount || `0 — edit ${CONFIG_FILE}`}`);
+  console.log(`  Viewer: ${VIEWER_URL}\n`);
+
+  setSaasTarget(RELAY_WS_URL, SESSION_ID);
 
 // Hit the GitHub Releases API once at boot and print a banner if a newer
 // kube-logger-agent is available. Fire-and-forget, 3s timeout, silent on
@@ -577,5 +653,6 @@ setInterval(() => {
   checkAuth(authCache.profile, true).then(r => broadcast({ type: 'auth-status', ...r }));
 }, 60000);
 
-process.on('SIGINT', () => { stopCapture(); process.exit(0); });
-process.on('SIGTERM', () => { stopCapture(); process.exit(0); });
+  process.on('SIGINT', () => { stopCapture(); process.exit(0); });
+  process.on('SIGTERM', () => { stopCapture(); process.exit(0); });
+})();

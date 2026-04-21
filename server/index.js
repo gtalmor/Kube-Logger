@@ -194,6 +194,28 @@ const httpServer = http.createServer((req, res) => {
   serveStatic(req, res);
 });
 
+// ── WebSocket keepalive ────────────────────────────────────────
+// Browsers / agents sometimes drop the connection without sending a Close
+// frame (laptop sleep, network cut, browser-tab killed). Without a ping
+// the server never notices and the consumer lingers in s.consumers forever
+// — making the presence pill report ghost viewers. Every 30s we ping each
+// open socket; if the previous ping wasn't pong'd back, terminate.
+const PING_INTERVAL_MS = 30000;
+function attachKeepalive(ws) {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+}
+setInterval(() => {
+  for (const s of sessions.values()) {
+    const all = [s.producer, ...s.consumers].filter(Boolean);
+    for (const ws of all) {
+      if (ws.isAlive === false) { try { ws.terminate(); } catch {} continue; }
+      ws.isAlive = false;
+      try { ws.ping(); } catch {}
+    }
+  }
+}, PING_INTERVAL_MS).unref();
+
 // ── WebSocket upgrade ──────────────────────────────────────────
 // /producer?session=X&key=Y — first connect binds the key; later producers
 //   presenting a different key are rejected.
@@ -249,6 +271,7 @@ wss.on('connection', ws => {
       try { s.producer.close(4000, 'replaced by newer producer'); } catch {}
     }
     s.producer = ws;
+    attachKeepalive(ws);
     log(ws.session, `producer connected (consumers: ${s.consumers.size})`);
     fanoutToConsumers(s, JSON.stringify({ type: 'producer-ready' }));
 
@@ -270,6 +293,7 @@ wss.on('connection', ws => {
   ws.idle = false;
   ws.following = false;
   ws.presenting = false;
+  attachKeepalive(ws);
   s.consumers.add(ws);
   log(ws.session, `consumer connected (producer: ${s.producer ? 'yes' : 'no'}, readOnly: ${ws.readOnly}, total: ${s.consumers.size})`);
 
