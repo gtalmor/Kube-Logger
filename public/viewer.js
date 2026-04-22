@@ -92,9 +92,11 @@ const NX=/^(\S+)\s+(\S+)\s+(\S+)\s+-\s+-\s+\[([^\]]+)\]\s+"(\w+)\s+(\S+)\s+\S+"\
 const SJ=/^(\S+)\s+(\S+)\s+(\{.+\})$/;
 const SP=/^([+-])\s+(\S+)\s+.\s+(\S+)$/;
 
-const FLOW_NODE_RE=/\[([^\]]+)\]\s+(\S+)\s+-\s+Node\s+(\S+)\s+is\s+in\s+(\w+)\s+state(?:,\s+next\s+node\s+is\s+(\S+))?/;
-const FLOW_FAIL_RE=/Failure from node\s+(\S+)\s+\(([^)]+)\)/;
-const FLOW_FAIL_FULL_RE=/\[([^\]]+)\]\s+(\S+)\s+-\s+Failure from node\s+(\S+)\s+\(([^)]+)\)/;
+// Node names can be multi-word (e.g. custom node 'JS Executer'), so the node
+// capture is lazy up to ' is in ' / ' (' instead of \S+.
+const FLOW_NODE_RE=/\[([^\]]+)\]\s+(\S+)\s+-\s+Node\s+(.+?)\s+is\s+in\s+(\w+)\s+state(?:,\s+next\s+node\s+is\s+(\S+))?/;
+const FLOW_FAIL_RE=/Failure from node\s+(.+?)\s+\(([^)]+)\)/;
+const FLOW_FAIL_FULL_RE=/\[([^\]]+)\]\s+(\S+)\s+-\s+Failure from node\s+(.+?)\s+\(([^)]+)\)/;
 const FLOW_START_RE=/\[([^\]]+)\]\s+(\S+)\s+-\s+(Starting|Executing|Running)\s/i;
 const FLOW_PATH_RE=/\/flow\/execute\/(?:custom\/)?([^?\s/]+)/;
 const AXIOS_ERR_RE=/Error.*?:\s*(AxiosError:.*)/;
@@ -466,8 +468,8 @@ function buildWaterfall(flow){
 
 function extractFlow(lines){
   const nodes=[],seen=new Set();
-  const nr=/\[([^\]]+)\]\s+(\S+)\s+-\s+Node\s+(\S+)\s+is\s+in\s+(\w+)\s+state(?:,\s+next\s+node\s+is\s+(\S+))?/;
-  const fr=/Failure from node\s+(\S+)\s+\(([^)]+)\)/;
+  const nr=/\[([^\]]+)\]\s+(\S+)\s+-\s+Node\s+(.+?)\s+is\s+in\s+(\w+)\s+state(?:,\s+next\s+node\s+is\s+(\S+))?/;
+  const fr=/Failure from node\s+(.+?)\s+\(([^)]+)\)/;
   const fnc=/"Failure" output of node (\d+) is not connected/;
   // Build a map of numeric node ID -> label from failure messages
   const idLabels=new Map();
