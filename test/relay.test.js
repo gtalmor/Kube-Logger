@@ -184,7 +184,10 @@ test('invitee presenter is opt-in — other invitees must follow explicitly', { 
   inv2.send(JSON.stringify({ action: 'follow', following: true }));
   await sleep(50);
   inv1.send(JSON.stringify({ action: 'presenter-state', state: { search: 'now-delivered' } }));
-  const got = await waitForMessage(inv2, m => m.type === 'presenter-state', 800);
+  // Opt-in triggers a cached replay first, then the new frame arrives — wait
+  // for the specific one we sent post-opt-in.
+  const got = await waitForMessage(inv2,
+    m => m.type === 'presenter-state' && m.state.search === 'now-delivered', 800);
   assert.equal(got.state.search, 'now-delivered');
 
   owner.close(); inv1.close(); inv2.close();
@@ -231,6 +234,81 @@ test('late-joining invitee is force-followed into an ongoing owner presentation'
   assert.equal(got.state.search, 'late-join');
 
   owner.close(); invitee.close();
+});
+
+test('owner second tab is NOT force-followed when owner presents', { timeout: TIMEOUT }, async () => {
+  // If the relay flagged a second owner tab as forceFollowing, the viewer
+  // (which only shows the forced UX when RO_TOKEN is present) would show an
+  // opt-in Follow button — clicking it would be silently ignored by the
+  // relay because forceFollowing is sticky. Stateful desync.
+  const session = sid();
+  const tab1 = await openConsumer(session);
+  const tab2 = await openConsumer(session);
+  await drainSetup(tab1); await drainSetup(tab2);
+
+  tab1.send(JSON.stringify({ action: 'presenter-start' }));
+  await waitForMessage(tab2, m => m.type === 'presenter-status' && m.presenting);
+
+  // tab2 never opted in — should NOT receive presenter-state.
+  tab1.send(JSON.stringify({ action: 'presenter-state', state: { search: 'not-for-tab2' } }));
+  await assert.rejects(
+    waitForMessage(tab2, m => m.type === 'presenter-state', 400),
+    /timeout/,
+  );
+
+  // Opting in works — tab2 controls whether they follow. Opt-in triggers a
+  // cached replay ('not-for-tab2') immediately, followed by new frames.
+  tab2.send(JSON.stringify({ action: 'follow', following: true }));
+  await sleep(30);
+  tab1.send(JSON.stringify({ action: 'presenter-state', state: { search: 'opted-in' } }));
+  const got = await waitForMessage(tab2,
+    m => m.type === 'presenter-state' && m.state.search === 'opted-in', 800);
+  assert.equal(got.state.search, 'opted-in');
+
+  // And opting back OUT must actually unfollow (not ignored as if forced).
+  tab2.send(JSON.stringify({ action: 'follow', following: false }));
+  await sleep(30);
+  tab1.send(JSON.stringify({ action: 'presenter-state', state: { search: 'unfollowed' } }));
+  await assert.rejects(
+    waitForMessage(tab2,
+      m => m.type === 'presenter-state' && m.state.search === 'unfollowed', 400),
+    /timeout/,
+  );
+
+  tab1.close(); tab2.close();
+});
+
+test('owner presenting force-follows ALL invitees at once', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const owner = await openConsumer(session);
+  await drainSetup(owner);
+  const invs = [
+    await redeemInvitee(owner, session),
+    await redeemInvitee(owner, session),
+    await redeemInvitee(owner, session),
+  ];
+  for (const i of invs) await drainSetup(i);
+  await drainSetup(owner);
+
+  // Attach listeners FIRST, then send — avoids any race where the broadcast
+  // lands before waitForMessage registers its listener.
+  const statusP = Promise.all(invs.map(i =>
+    waitForMessage(i, m => m.type === 'presenter-status' && m.presenting, 1500)));
+  const countP = waitForMessage(owner,
+    m => m.type === 'presenter-status' && m.followers === 3, 1500);
+  owner.send(JSON.stringify({ action: 'presenter-start' }));
+  const statuses = await statusP;
+  for (const s of statuses) assert.equal(s.forced, true);
+  const finalStatus = await countP;
+  assert.equal(finalStatus.followers, 3);
+
+  const stateP = Promise.all(invs.map(i =>
+    waitForMessage(i, m => m.type === 'presenter-state', 1500)));
+  owner.send(JSON.stringify({ action: 'presenter-state', state: { search: 'broadcast' } }));
+  const gets = await stateP;
+  for (const g of gets) assert.equal(g.state.search, 'broadcast');
+
+  owner.close(); for (const i of invs) i.close();
 });
 
 test('late joiner immediately receives the cached presenter-state', { timeout: TIMEOUT }, async () => {
@@ -341,6 +419,75 @@ test('presenter-state does NOT echo to the sender', { timeout: TIMEOUT }, async 
   owner.close();
 });
 
+test('late joiner receives log history replay from the session buffer', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const prod = await openProducer(session, key());
+  // Producer streams a few logs BEFORE any consumer is connected.
+  prod.send(JSON.stringify({ type: 'log', line: 'pre-1', i: 1 }));
+  prod.send(JSON.stringify({ type: 'log', line: 'pre-2', i: 2 }));
+  prod.send(JSON.stringify({ type: 'log', line: 'pre-3', i: 3 }));
+  await sleep(60);
+
+  const late = await openConsumer(session);
+  const begin = await waitForMessage(late, m => m.type === 'history-begin', 1000);
+  assert.equal(begin.count, 3);
+  const m1 = await waitForMessage(late, m => m.type === 'log' && m.line === 'pre-1', 1000);
+  const m2 = await waitForMessage(late, m => m.type === 'log' && m.line === 'pre-2', 1000);
+  const m3 = await waitForMessage(late, m => m.type === 'log' && m.line === 'pre-3', 1000);
+  const end = await waitForMessage(late, m => m.type === 'history-end', 1000);
+  assert.ok(m1 && m2 && m3 && end);
+
+  // And live logs after the replay still reach the late joiner.
+  prod.send(JSON.stringify({ type: 'log', line: 'live-1', i: 4 }));
+  const m4 = await waitForMessage(late, m => m.type === 'log' && m.line === 'live-1', 1000);
+  assert.equal(m4.line, 'live-1');
+
+  prod.close(); late.close();
+});
+
+test('history buffer does not replay non-log producer frames', { timeout: TIMEOUT }, async () => {
+  // Status / ack-style messages from the producer are ephemeral — they
+  // shouldn't leak into a late joiner's replay as if they were fresh events.
+  const session = sid();
+  const prod = await openProducer(session, key());
+  prod.send(JSON.stringify({ type: 'log', line: 'real-log', i: 1 }));
+  prod.send(JSON.stringify({ type: 'auth-status', ok: true, arn: 'arn:ephemeral' }));
+  prod.send(JSON.stringify({ type: 'init', capturing: false }));
+  await sleep(60);
+
+  const late = await openConsumer(session);
+  const begin = await waitForMessage(late, m => m.type === 'history-begin', 1000);
+  assert.equal(begin.count, 1, 'only the log frame should be replayed');
+  const log = await waitForMessage(late, m => m.type === 'log', 1000);
+  assert.equal(log.line, 'real-log');
+
+  prod.close(); late.close();
+});
+
+test('history survives a producer reconnect', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const k = key();
+  const prod1 = await openProducer(session, k);
+  // Keep one consumer connected across the swap so the relay doesn't
+  // dropIfEmpty the session (which would wipe history along with it).
+  const keeper = await openConsumer(session);
+  prod1.send(JSON.stringify({ type: 'log', line: 'before-reconnect', i: 1 }));
+  await sleep(50);
+  prod1.close();
+  await sleep(50);
+
+  const prod2 = await openProducer(session, k);
+  prod2.send(JSON.stringify({ type: 'log', line: 'after-reconnect', i: 2 }));
+  await sleep(50);
+
+  const late = await openConsumer(session);
+  const m1 = await waitForMessage(late, m => m.type === 'log' && m.line === 'before-reconnect', 1000);
+  const m2 = await waitForMessage(late, m => m.type === 'log' && m.line === 'after-reconnect', 1000);
+  assert.ok(m1 && m2);
+
+  prod2.close(); keeper.close(); late.close();
+});
+
 test('kick-invitees revokes invites and closes invitee sockets', { timeout: TIMEOUT }, async () => {
   const session = sid();
   const owner = await openConsumer(session);
@@ -394,12 +541,38 @@ async function waitFor(fn, ms) {
 }
 
 // Open helpers — resolve only after 'open', reject on first 'error'.
+// Every opened socket is instrumented with an in-memory queue so tests can
+// match messages that arrived before they got a chance to attach a listener
+// (the server sends a burst — relay-hello, presenter-status, history — as
+// soon as the handshake completes; a naive listener-after-open loses them).
+function instrument(ws) {
+  ws._queue = [];
+  ws._waiters = [];
+  ws.on('message', raw => {
+    let parsed = null;
+    try { parsed = JSON.parse(raw.toString()); } catch { return; }
+    ws._queue.push(parsed);
+    for (let i = 0; i < ws._waiters.length; i++) {
+      const w = ws._waiters[i];
+      const idx = ws._queue.findIndex(w.pred);
+      if (idx >= 0) {
+        const m = ws._queue.splice(idx, 1)[0];
+        ws._waiters.splice(i, 1);
+        clearTimeout(w.timeout);
+        w.resolve(m);
+        i--;
+      }
+    }
+  });
+  return ws;
+}
+
 function waitForOpen(ws, ms = 2000) {
   return new Promise((resolve, reject) => {
-    if (ws.readyState === 1) return resolve(ws);
+    if (ws.readyState === 1) return resolve(instrument(ws));
     const t = setTimeout(() => { cleanup(); reject(new Error('open timeout')); }, ms);
     function cleanup() { clearTimeout(t); ws.off('open', ok); ws.off('error', err); }
-    function ok()    { cleanup(); resolve(ws); }
+    function ok()    { cleanup(); resolve(instrument(ws)); }
     function err(e)  { cleanup(); reject(e); }
     ws.once('open', ok);
     ws.once('error', err);
@@ -430,9 +603,7 @@ function waitForClose(ws, ms = 2000) {
 // next *real* message rather than these.
 function drainSetup(ws, ms = 200) {
   return new Promise(resolve => {
-    const onMsg = () => {};
-    ws.on('message', onMsg);
-    setTimeout(() => { ws.off('message', onMsg); resolve(); }, ms);
+    setTimeout(() => { if (ws._queue) ws._queue.length = 0; resolve(); }, ms);
   });
 }
 
@@ -452,13 +623,19 @@ async function redeemInvitee(ownerWs, session) {
 
 function waitForMessage(ws, pred, ms = 2000) {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => { ws.off('message', onMsg); reject(new Error('timeout')); }, ms);
-    function onMsg(raw) {
-      try {
-        const m = JSON.parse(raw.toString());
-        if (pred(m)) { clearTimeout(t); ws.off('message', onMsg); resolve(m); }
-      } catch {}
+    // Drain any already-queued matching message first.
+    if (ws._queue) {
+      const idx = ws._queue.findIndex(pred);
+      if (idx >= 0) return resolve(ws._queue.splice(idx, 1)[0]);
     }
-    ws.on('message', onMsg);
+    const waiter = { pred, resolve };
+    waiter.timeout = setTimeout(() => {
+      if (ws._waiters) {
+        const i = ws._waiters.indexOf(waiter);
+        if (i >= 0) ws._waiters.splice(i, 1);
+      }
+      reject(new Error('timeout'));
+    }, ms);
+    (ws._waiters || (ws._waiters = [])).push(waiter);
   });
 }

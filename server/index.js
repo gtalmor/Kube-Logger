@@ -28,6 +28,12 @@ const HOST = process.env.HOST || '127.0.0.1';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MIN_SESSION_LEN = 16;
 
+// Per-session log ring buffer so late-joining consumers see the history
+// captured before they connected, not just go-forward. Bounded by both
+// line count and byte size to cap memory per session.
+const HISTORY_MAX_LINES = parseInt(process.env.HISTORY_MAX_LINES || '20000', 10);
+const HISTORY_MAX_BYTES = parseInt(process.env.HISTORY_MAX_BYTES || String(10 * 1024 * 1024), 10);
+
 const DEFAULT_INVITE_TTL_MS   = 60 * 60 * 1000;  // 1h
 const MAX_INVITE_TTL_MS       = 24 * 60 * 60 * 1000; // 24h
 const RO_TOKEN_TTL_MS         = 12 * 60 * 60 * 1000; // 12h once redeemed
@@ -41,8 +47,34 @@ const sessions = new Map();
 
 function getOrCreateSession(id) {
   let s = sessions.get(id);
-  if (!s) { s = { producer: null, producerKey: null, consumers: new Set(), presenter: null, lastPresenterState: null, startedAt: Date.now() }; sessions.set(id, s); }
+  if (!s) {
+    s = {
+      producer: null,
+      producerKey: null,
+      consumers: new Set(),
+      presenter: null,
+      lastPresenterState: null,
+      history: [],          // ring buffer of raw 'log' frames
+      historyBytes: 0,
+      startedAt: Date.now(),
+    };
+    sessions.set(id, s);
+  }
   return s;
+}
+
+// Append a producer frame to the session history and evict oldest entries
+// until both line-count and byte-size caps are satisfied.
+function pushHistory(s, raw) {
+  s.history.push(raw);
+  s.historyBytes += raw.length;
+  while (
+    (s.history.length > HISTORY_MAX_LINES || s.historyBytes > HISTORY_MAX_BYTES)
+    && s.history.length > 0
+  ) {
+    const dropped = s.history.shift();
+    s.historyBytes -= dropped.length;
+  }
 }
 
 function dropIfEmpty(id) {
@@ -276,7 +308,15 @@ wss.on('connection', ws => {
     fanoutToConsumers(s, JSON.stringify({ type: 'producer-ready' }));
 
     ws.on('message', buf => {
-      fanoutToConsumers(s, buf.toString());
+      const raw = buf.toString();
+      // Opportunistically buffer log frames so later-joining consumers can
+      // replay captured history. Ignore non-log messages (acks, status) —
+      // they're ephemeral and shouldn't be replayed.
+      try {
+        const m = JSON.parse(raw);
+        if (m && m.type === 'log') pushHistory(s, raw);
+      } catch {}
+      fanoutToConsumers(s, raw);
     });
 
     ws.on('close', () => {
@@ -304,10 +344,23 @@ wss.on('connection', ws => {
     producerConnected: !!s.producer,
     readOnly: ws.readOnly,
   }));
+  // Replay buffered log history so the late joiner sees what was captured
+  // before they connected. Sent as individual frames so the viewer's live
+  // log path handles them without special-casing. Wrapped in a bracketing
+  // pair of markers so the viewer can show a spinner / "loading history"
+  // hint if it wants to.
+  if (s.history.length) {
+    safeSend(ws, JSON.stringify({ type: 'history-begin', count: s.history.length }));
+    for (const raw of s.history) safeSend(ws, raw);
+    safeSend(ws, JSON.stringify({ type: 'history-end' }));
+  }
   broadcastPresence(s);
-  // A new consumer joining while an owner is already presenting should be
-  // force-followed too, so they immediately track the ongoing presentation.
-  if (s.presenter && !s.presenter.readOnly && ws !== s.presenter) {
+  // A new INVITEE joining while an owner is already presenting should be
+  // force-followed so they immediately track the ongoing presentation. Other
+  // owner tabs (readOnly=false) are opt-in like any normal follower — we
+  // don't want the relay flagging them forceFollowing while the viewer
+  // shows them an opt-in Follow button (that would desync the two sides).
+  if (s.presenter && !s.presenter.readOnly && ws !== s.presenter && ws.readOnly) {
     ws.forceFollowing = true;
   }
   safeSend(ws, JSON.stringify({
@@ -400,7 +453,10 @@ function handlePresenterStart(ws, s) {
   s.lastPresenterState = null;  // new presenter, new view — drop stale cache
   const forced = !ws.readOnly;
   for (const c of s.consumers) {
-    c.forceFollowing = forced && c !== ws;
+    // Force only INVITEES (readOnly consumers). Other owner tabs remain opt-in
+    // — the viewer's "forced" UX keys off RO_TOKEN, so flagging a tokenless
+    // owner tab as forceFollowing would desync the relay from the UI.
+    c.forceFollowing = forced && c !== ws && c.readOnly;
   }
   broadcastPresenterStatus(s);
 }

@@ -1841,13 +1841,25 @@ function connect(){
         $('lc').innerHTML='';$('lc').classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';
         Drawer.onCaptureStart(m);
         break;
+      case'history-begin':
+        // Relay is about to replay buffered log frames from before we joined.
+        // Reveal the log area so replayed lines land somewhere, and flag the
+        // next burst of 'log' messages as history (skip Drawer.onLog side
+        // effects, skip the new-line chime — they're not new).
+        $('lc').classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';
+        S._replaying=true;
+        if(m.count)toast(`Loading ${m.count} previously captured lines…`);
+        break;
+      case'history-end':
+        S._replaying=false;
+        break;
       case'log':
         // If log traffic beat the init response (common after a hard refresh
         // while a capture is already streaming), reveal the log area now so
         // the inserted lines aren't stuck in a display:none container.
         if(!$('lc').classList.contains('v')){$('lc').classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';}
         try{addLive(m.line,m.ns);}catch(e){console.error('addLive error:',e);}
-        Drawer.onLog(m);
+        if(!S._replaying)Drawer.onLog(m);
         break;
       case'cleared':clearState();Drawer.onCleared();break;
       case'ns-added':{
