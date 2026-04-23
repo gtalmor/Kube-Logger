@@ -295,6 +295,20 @@ function getSsoExpiration() {
   } catch { return null; }
 }
 
+// Shell out to aws/kubectl with a sanitized environment — strip every AWS_*
+// variable the parent shell might have set (AWS_PROFILE, AWS_ACCESS_KEY_ID,
+// AWS_SESSION_TOKEN, etc.) so they don't silently shadow the --profile we
+// pass on the CLI. Equivalent to the user's habit of
+// `unset $(env | egrep '^AWS_' | cut -d= -f1)` before any aws command.
+function cleanAwsEnv(extra) {
+  const env = {};
+  for (const k of Object.keys(process.env)) {
+    if (!k.startsWith('AWS_')) env[k] = process.env[k];
+  }
+  if (extra) Object.assign(env, extra);
+  return env;
+}
+
 function checkAuth(profile, force) {
   return new Promise(resolve => {
     const now = Date.now();
@@ -305,7 +319,7 @@ function checkAuth(profile, force) {
       ? `aws sts get-caller-identity --profile ${profile} 2>&1`
       : `kubectl auth can-i get pods --all-namespaces 2>&1`;
 
-    exec(cmd, { timeout: 10000 }, (err, out) => {
+    exec(cmd, { timeout: 10000, env: cleanAwsEnv() }, (err, out) => {
       if (err) {
         authCache = { ts: now, profile, ok: false, err: (out || '').trim().slice(0, 200) };
       } else {
@@ -325,7 +339,7 @@ function checkAuth(profile, force) {
 function doLogin(profile, send) {
   const cluster = CFG.clusters[profile];
   const region = CFG.region;
-  const proc = spawn('aws', ['sso', 'login', '--profile', profile], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const proc = spawn('aws', ['sso', 'login', '--profile', profile], { stdio: ['pipe', 'pipe', 'pipe'], env: cleanAwsEnv() });
   let out = '';
   proc.stdout.on('data', d => out += d);
   proc.stderr.on('data', d => out += d);
@@ -343,7 +357,7 @@ function doLogin(profile, send) {
     }
     try {
       execSync(`aws eks update-kubeconfig --name ${cluster} --region ${region}`, {
-        env: { ...process.env, AWS_DEFAULT_PROFILE: profile, AWS_REGION: region }, timeout: 15000
+        env: cleanAwsEnv({ AWS_DEFAULT_PROFILE: profile, AWS_REGION: region }), timeout: 15000
       });
       authCache = { ...authCache, cluster };
       broadcast({ type: 'auth-status', ...authCache });
@@ -435,11 +449,10 @@ function spawnStream(ns, env) {
 
 function attachStream(ns) {
   if (!capture || capture.procs.has(ns)) return;
-  const env = { ...process.env };
-  if (authCache && authCache.profile) {
-    env.AWS_DEFAULT_PROFILE = authCache.profile;
-    env.AWS_REGION = CFG.region;
-  }
+  const extra = authCache && authCache.profile
+    ? { AWS_DEFAULT_PROFILE: authCache.profile, AWS_REGION: CFG.region }
+    : undefined;
+  const env = cleanAwsEnv(extra);
 
   const proc = spawnStream(ns, env);
   let buf = '';
