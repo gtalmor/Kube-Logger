@@ -970,20 +970,20 @@ function hideFlowExec(execId,flowName){
   S.hiddenExecIds.add(execId);
   // Also find all reqIds associated with this execId so we can hide their non-flow lines too
   rebuildHiddenReqIds();
-  updateFlow();updateHiddenBtn();rebuildFiltered();fullRender();
+  updateFlow();updateHiddenBtn();rebuildFiltered();fullRender();presentSoon();
   toast(`Hidden flow: ${flowName||execId.slice(0,8)}`);
 }
 
 function unhideFlowExec(execId){
   S.hiddenExecIds.delete(execId);
   rebuildHiddenReqIds();
-  updateFlow();updateHiddenBtn();rebuildFiltered();fullRender();
+  updateFlow();updateHiddenBtn();rebuildFiltered();fullRender();presentSoon();
 }
 
 function clearHiddenExecs(){
   S.hiddenExecIds.clear();
   S._hiddenReqIds=null;
-  updateFlow();updateHiddenBtn();rebuildFiltered();fullRender();
+  updateFlow();updateHiddenBtn();rebuildFiltered();fullRender();presentSoon();
 }
 
 function rebuildHiddenReqIds(){
@@ -1000,21 +1000,21 @@ function addHighlight(term){
   S.highlights.push(term);
   localStorage.setItem(HIGHLIGHT_KEY,JSON.stringify(S.highlights));
   updateHighlightBtn();
-  fullRender();
+  fullRender();presentSoon();
 }
 
 function removeHighlight(idx){
   S.highlights.splice(idx,1);
   localStorage.setItem(HIGHLIGHT_KEY,JSON.stringify(S.highlights));
   updateHighlightBtn();
-  fullRender();
+  fullRender();presentSoon();
 }
 
 function clearHighlights(){
   S.highlights=[];
   localStorage.setItem(HIGHLIGHT_KEY,JSON.stringify(S.highlights));
   updateHighlightBtn();
-  fullRender();
+  fullRender();presentSoon();
 }
 
 function updateHighlightBtn(){
@@ -1161,21 +1161,21 @@ function addHiddenPattern(pattern){
   S.hiddenPatterns.push(pattern);
   saveHiddenPatterns();
   updateHiddenBtn();
-  rebuildFiltered();fullRender();
+  rebuildFiltered();fullRender();presentSoon();
 }
 
 function removeHiddenPattern(idx){
   S.hiddenPatterns.splice(idx,1);
   saveHiddenPatterns();
   updateHiddenBtn();
-  rebuildFiltered();fullRender();
+  rebuildFiltered();fullRender();presentSoon();
 }
 
 function clearHiddenPatterns(){
   S.hiddenPatterns=[];
   saveHiddenPatterns();
   updateHiddenBtn();
-  rebuildFiltered();fullRender();
+  rebuildFiltered();fullRender();presentSoon();
 }
 
 function saveHiddenPatterns(){
@@ -1302,9 +1302,11 @@ function buildFlowPath(nodes){
   return path;
 }
 
-function openTrace(reqId){
+function openTrace(reqId,opts){
   const reqLines=S.lines.filter(l=>l&&l.reqId===reqId);
   if(!reqLines.length){toast('No logs for this request');return;}
+  S.currentTraceReqId=reqId;
+  if(!(opts&&opts.fromPresenter))presentSoon();
 
   // Build node ID -> label map from failure messages
   const nodeLabels=buildNodeLabelMap(reqLines);
@@ -1522,7 +1524,11 @@ function openTrace(reqId){
   };
 }
 
-function closeTrace(){$('tracePanel').classList.remove('v');}
+function closeTrace(opts){
+  $('tracePanel').classList.remove('v');
+  S.currentTraceReqId=null;
+  if(!(opts&&opts.fromPresenter))presentSoon();
+}
 
 // ── Trace panel resize ──────────────────────────────────────────────
 // Drag the left edge to widen / narrow. Preferred width persists.
@@ -1779,7 +1785,10 @@ function connect(){
         onPresenterStatus(m);
         break;
       case'presenter-state':
-        if(S.following)applyPresenterState(m.state);
+        if(S.following||S.forced)applyPresenterState(m.state);
+        break;
+      case'presenter-revoked':
+        onPresenterRevoked();
         break;
       case'invite-created':
         ShareView.onInviteCreated(m);
@@ -1932,25 +1941,61 @@ function renderPresence(counts){
 }
 
 // ── Follow-the-leader (presenter mode) ─────────────────────────────
-// Owner toggles Present; their search / filters / jump-to-line are broadcast.
-// Any consumer (owner or invitee) can toggle Follow to apply incoming state.
-S.presenting = false;
-S.following  = false;
+// Both owner and invitees can toggle Present. When the OWNER is presenting,
+// invitees are force-followed with no opt-out (drop-in screen share). When
+// an invitee is presenting, others see a subtle "X is presenting — Follow"
+// prompt and opt in manually.
+S.presenting  = false;
+S.following   = false;  // our local opt-in flag
+S.forced      = false;  // relay flagged this presentation as owner-forced
+S.currentTraceReqId = null;
 
 function onPresenterStatus(m) {
-  const presenting = !!m.presenting;
-  // Follow button is only meaningful when someone is actually presenting —
-  // if that ends and we were following, drop the flag too.
-  if (!presenting && S.following) { S.following = false; toast('Presenter ended'); }
-  // Followers-count badge on the Present button (owner only).
+  const presenting       = !!m.presenting;
+  const presenterIsOwner = !!m.presenterIsOwner;
+  // Keep our local followers-count badge fresh when we're the one presenting.
   if (S.presenting) {
     $('presentBtn').textContent = m.followers ? `🫱 Presenting · ${m.followers}` : '🫱 Presenting · 0';
+    return;
   }
-  const fb = $('followBtn');
-  // Hide Follow button entirely when nobody's presenting.
-  fb.style.display = presenting ? '' : 'none';
-  fb.textContent   = S.following ? '👀 Following' : '👀 Follow';
-  fb.classList.toggle('active', S.following);
+  // Force-follow applies to invitees when the presenter is the owner.
+  const forced = presenting && presenterIsOwner && !!RO_TOKEN;
+  S.forced = forced;
+  if (forced) {
+    if (!S.following) S.following = true;  // take effect immediately
+    $('followBtn').style.display = 'none';  // can't opt out
+    showForcedBanner(true);
+  } else {
+    showForcedBanner(false);
+    const fb = $('followBtn');
+    fb.style.display = presenting ? '' : 'none';
+    fb.textContent   = S.following ? '👀 Following' : '👀 Follow';
+    fb.classList.toggle('active', S.following);
+  }
+  if (!presenting && S.following && !forced) { S.following = false; toast('Presenter ended'); }
+}
+
+function showForcedBanner(on) {
+  let el = $('forcedFollowBanner');
+  if (on) {
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'forcedFollowBanner';
+      el.className = 'forced-banner';
+      el.innerHTML = '⚡ Owner is presenting — your view is being driven.';
+      document.body.querySelector('.bar').after(el);
+    }
+    el.style.display = 'flex';
+  } else if (el) el.style.display = 'none';
+}
+
+// Relay-issued takeover — our presenter status was revoked. Flip UI back.
+function onPresenterRevoked() {
+  if (!S.presenting) return;
+  S.presenting = false;
+  const b = $('presentBtn');
+  if (b) { b.classList.remove('active'); b.textContent = '🫱 Present'; }
+  toast('Presentation taken over by the owner');
 }
 
 // Debounced broadcast of the driving state. Some events (scroll-to-line) bypass
@@ -1961,6 +2006,10 @@ function snapshotState(extra) {
     search: S.search,
     level: {...S.level}, pod: {...S.pod}, req: {...S.req},
     hideTrace: !!S.hideTrace,
+    highlights: [...S.highlights],
+    hiddenPatterns: [...S.hiddenPatterns],
+    hiddenExecIds: [...S.hiddenExecIds],
+    tracePanelReqId: S.currentTraceReqId || null,
     ...(extra || {}),
   };
 }
@@ -1990,33 +2039,57 @@ function applyPresenterState(state) {
     b.classList.toggle('active', S.hideTrace);
     b.textContent = S.hideTrace ? 'Show TRACE' : 'Hide TRACE';
   }
+  if (Array.isArray(state.highlights)) {
+    S.highlights = [...state.highlights];
+    updateHighlightBtn();
+  }
+  if (Array.isArray(state.hiddenPatterns)) {
+    S.hiddenPatterns = [...state.hiddenPatterns];
+    updateHiddenBtn();
+  }
+  if (Array.isArray(state.hiddenExecIds)) {
+    S.hiddenExecIds = new Set(state.hiddenExecIds);
+    rebuildHiddenReqIds();
+    updateFlow();
+    updateHiddenBtn();
+  }
   rebuildFiltered(); fullRender();
+  // Mirror trace-panel open/close with presenter. Skip the expensive re-open if
+  // we're already viewing the same reqId.
+  if (state.tracePanelReqId !== undefined) {
+    const target = state.tracePanelReqId || null;
+    if (target) {
+      if (S.currentTraceReqId !== target) openTrace(target, { fromPresenter: true });
+    } else if (S.currentTraceReqId) {
+      closeTrace({ fromPresenter: true });
+    }
+  }
   if (state.scrollToIdx !== undefined && Number.isInteger(state.scrollToIdx)) {
     scrollTo(state.scrollToIdx);
   }
 }
 
-// Only non-read-only consumers get a Present button.
-if (!RO_TOKEN) {
-  $('presentBtn').style.display = '';
-  $('presentBtn').textContent = '🫱 Present';
-  $('presentBtn').addEventListener('click', () => {
-    S.presenting = !S.presenting;
-    const b = $('presentBtn');
-    b.classList.toggle('active', S.presenting);
-    if (S.presenting) {
-      b.textContent = '🫱 Presenting · 0';
-      send({ action: 'presenter-start' });
-      // Push an initial snapshot so followers immediately match my view.
-      presentNow();
-    } else {
-      b.textContent = '🫱 Present';
-      send({ action: 'presenter-stop' });
-    }
-  });
-}
+// Everyone — owner or invitee — gets a Present button. The relay enforces
+// the force-follow vs opt-in semantics based on who the presenter is.
+$('presentBtn').style.display = '';
+$('presentBtn').textContent = '🫱 Present';
+$('presentBtn').addEventListener('click', () => {
+  S.presenting = !S.presenting;
+  const b = $('presentBtn');
+  b.classList.toggle('active', S.presenting);
+  if (S.presenting) {
+    b.textContent = '🫱 Presenting · 0';
+    send({ action: 'presenter-start' });
+    // Push an initial snapshot so followers immediately match my view.
+    presentNow();
+  } else {
+    b.textContent = '🫱 Present';
+    send({ action: 'presenter-stop' });
+  }
+});
 
 $('followBtn').addEventListener('click', () => {
+  if (S.forced) return;  // relay will reject anyway — spare the round-trip
   S.following = !S.following;
   const b = $('followBtn');
   b.classList.toggle('active', S.following);

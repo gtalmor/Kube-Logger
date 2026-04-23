@@ -119,52 +119,132 @@ test('invalid invite code returns 404', { timeout: TIMEOUT }, async () => {
   assert.equal(res.status, 404);
 });
 
-test('read-only consumer cannot become presenter', { timeout: TIMEOUT }, async () => {
+test('owner presenting force-follows invitees without opt-in', { timeout: TIMEOUT }, async () => {
   const session = sid();
   const owner = await openConsumer(session);
   await drainSetup(owner);
-  // Mint an invite, redeem, connect as the invitee.
-  owner.send(JSON.stringify({ action: 'create-invite', ttl: 900, oneUse: false }));
-  const inv = await waitForMessage(owner, m => m.type === 'invite-created');
-  const redirect = await fetch(`${baseHttp}${inv.path}`, { redirect: 'manual' });
-  const token = new URL(redirect.headers.get('location'), baseHttp).searchParams.get('rotoken');
-  const invitee = new WebSocket(`${baseWs}/consumer?rotoken=${encodeURIComponent(token)}`);
-  await waitForOpen(invitee);
+  const invitee = await redeemInvitee(owner, session);
   await drainSetup(invitee);
 
-  // Invitee tries to claim presenter — relay should silently ignore.
-  invitee.send(JSON.stringify({ action: 'presenter-start' }));
-  // No presenter-status with presenting=true should arrive within 500ms.
-  await assert.rejects(
-    waitForMessage(owner, m => m.type === 'presenter-status' && m.presenting, 500),
-    /timeout/,
-  );
+  owner.send(JSON.stringify({ action: 'presenter-start' }));
+  // Relay status should mark the presentation as owner + forced.
+  const status = await waitForMessage(invitee, m => m.type === 'presenter-status' && m.presenting);
+  assert.equal(status.presenterIsOwner, true);
+  assert.equal(status.forced, true);
+
+  // Invitee never sent `follow:true` — but should still receive presenter-state.
+  owner.send(JSON.stringify({ action: 'presenter-state', state: { search: 'forced' } }));
+  const got = await waitForMessage(invitee, m => m.type === 'presenter-state', 800);
+  assert.equal(got.state.search, 'forced');
+
   owner.close(); invitee.close();
 });
 
-test('presenter-state fans out to followers but not to the sender', { timeout: TIMEOUT }, async () => {
+test('invitee cannot opt out of an owner force-follow', { timeout: TIMEOUT }, async () => {
   const session = sid();
-  const owner     = await openConsumer(session);
-  const follower  = await openConsumer(session);
-  const bystander = await openConsumer(session);
+  const owner = await openConsumer(session);
   await drainSetup(owner);
-  await drainSetup(follower);
-  await drainSetup(bystander);
+  const invitee = await redeemInvitee(owner, session);
+  await drainSetup(invitee);
 
-  follower.send(JSON.stringify({ action: 'follow', following: true }));
   owner.send(JSON.stringify({ action: 'presenter-start' }));
+  await waitForMessage(invitee, m => m.type === 'presenter-status' && m.presenting);
+
+  // Invitee tries to opt out. Relay should ignore and keep forwarding state.
+  invitee.send(JSON.stringify({ action: 'follow', following: false }));
   await sleep(50);
-  owner.send(JSON.stringify({ action: 'presenter-state', state: { search: 'hi' } }));
+  owner.send(JSON.stringify({ action: 'presenter-state', state: { search: 'still-forced' } }));
+  const got = await waitForMessage(invitee, m => m.type === 'presenter-state', 800);
+  assert.equal(got.state.search, 'still-forced');
 
-  const got = await waitForMessage(follower, m => m.type === 'presenter-state', 800);
-  assert.equal(got.state.search, 'hi');
+  owner.close(); invitee.close();
+});
 
-  // Bystander (not following) shouldn't have received presenter-state.
+test('invitee presenter is opt-in — other invitees must follow explicitly', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const owner = await openConsumer(session);
+  await drainSetup(owner);
+  const inv1 = await redeemInvitee(owner, session);
+  const inv2 = await redeemInvitee(owner, session);
+  await drainSetup(inv1); await drainSetup(inv2);
+
+  inv1.send(JSON.stringify({ action: 'presenter-start' }));
+  const status = await waitForMessage(inv2, m => m.type === 'presenter-status' && m.presenting);
+  assert.equal(status.presenterIsOwner, false);
+  assert.equal(status.forced, false);
+
+  // inv2 did NOT opt in — should NOT receive presenter-state.
+  inv1.send(JSON.stringify({ action: 'presenter-state', state: { search: 'invitee-broadcast' } }));
   await assert.rejects(
-    waitForMessage(bystander, m => m.type === 'presenter-state', 300),
+    waitForMessage(inv2, m => m.type === 'presenter-state', 400),
     /timeout/,
   );
-  owner.close(); follower.close(); bystander.close();
+
+  // After inv2 explicitly follows, presenter-state arrives.
+  inv2.send(JSON.stringify({ action: 'follow', following: true }));
+  await sleep(50);
+  inv1.send(JSON.stringify({ action: 'presenter-state', state: { search: 'now-delivered' } }));
+  const got = await waitForMessage(inv2, m => m.type === 'presenter-state', 800);
+  assert.equal(got.state.search, 'now-delivered');
+
+  owner.close(); inv1.close(); inv2.close();
+});
+
+test('owner takeover revokes invitee presenter and force-follows', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const owner = await openConsumer(session);
+  await drainSetup(owner);
+  const invitee = await redeemInvitee(owner, session);
+  await drainSetup(invitee);
+
+  invitee.send(JSON.stringify({ action: 'presenter-start' }));
+  await waitForMessage(owner, m => m.type === 'presenter-status' && m.presenting);
+
+  // Owner takes over. Invitee should get a presenter-revoked ack.
+  owner.send(JSON.stringify({ action: 'presenter-start' }));
+  const revoked = await waitForMessage(invitee, m => m.type === 'presenter-revoked', 800);
+  assert.ok(revoked);
+
+  // Now it's owner-forced — invitee should receive the owner's state.
+  owner.send(JSON.stringify({ action: 'presenter-state', state: { search: 'owner-took-over' } }));
+  const got = await waitForMessage(invitee, m => m.type === 'presenter-state', 800);
+  assert.equal(got.state.search, 'owner-took-over');
+
+  owner.close(); invitee.close();
+});
+
+test('late-joining invitee is force-followed into an ongoing owner presentation', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const owner = await openConsumer(session);
+  await drainSetup(owner);
+  owner.send(JSON.stringify({ action: 'presenter-start' }));
+  await sleep(50);
+
+  const invitee = await redeemInvitee(owner, session);
+  // Initial presenter-status on connect should already show forced.
+  const status = await waitForMessage(invitee, m => m.type === 'presenter-status' && m.presenting);
+  assert.equal(status.forced, true);
+
+  // A subsequent presenter-state reaches the new invitee without opting in.
+  owner.send(JSON.stringify({ action: 'presenter-state', state: { search: 'late-join' } }));
+  const got = await waitForMessage(invitee, m => m.type === 'presenter-state', 800);
+  assert.equal(got.state.search, 'late-join');
+
+  owner.close(); invitee.close();
+});
+
+test('presenter-state does NOT echo to the sender', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const owner = await openConsumer(session);
+  await drainSetup(owner);
+  owner.send(JSON.stringify({ action: 'presenter-start' }));
+  await sleep(30);
+  owner.send(JSON.stringify({ action: 'presenter-state', state: { search: 'self' } }));
+  await assert.rejects(
+    waitForMessage(owner, m => m.type === 'presenter-state', 300),
+    /timeout/,
+  );
+  owner.close();
 });
 
 test('kick-invitees revokes invites and closes invitee sockets', { timeout: TIMEOUT }, async () => {
@@ -260,6 +340,20 @@ function drainSetup(ws, ms = 200) {
     ws.on('message', onMsg);
     setTimeout(() => { ws.off('message', onMsg); resolve(); }, ms);
   });
+}
+
+// Mint an invite from `ownerWs`, redeem it over HTTP, and return an open
+// read-only consumer WebSocket. Each call to this bumps the owner's in-flight
+// messages so make sure you've drainSetup'd before the first call.
+async function redeemInvitee(ownerWs, session) {
+  ownerWs.send(JSON.stringify({ action: 'create-invite', ttl: 900, oneUse: false }));
+  const inv = await waitForMessage(ownerWs, m => m.type === 'invite-created');
+  const res = await fetch(`${baseHttp}${inv.path}`, { redirect: 'manual' });
+  const loc = res.headers.get('location') || '';
+  const token = new URL(loc, baseHttp).searchParams.get('rotoken');
+  const ws = new WebSocket(`${baseWs}/consumer?rotoken=${encodeURIComponent(token)}`);
+  await waitForOpen(ws);
+  return ws;
 }
 
 function waitForMessage(ws, pred, ms = 2000) {

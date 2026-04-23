@@ -291,7 +291,8 @@ wss.on('connection', ws => {
 
   // consumer
   ws.idle = false;
-  ws.following = false;
+  ws.following = false;      // explicitly opted-in to follow
+  ws.forceFollowing = false; // forced to follow because an owner is presenting
   ws.presenting = false;
   attachKeepalive(ws);
   s.consumers.add(ws);
@@ -304,10 +305,17 @@ wss.on('connection', ws => {
     readOnly: ws.readOnly,
   }));
   broadcastPresence(s);
+  // A new consumer joining while an owner is already presenting should be
+  // force-followed too, so they immediately track the ongoing presentation.
+  if (s.presenter && !s.presenter.readOnly && ws !== s.presenter) {
+    ws.forceFollowing = true;
+  }
   safeSend(ws, JSON.stringify({
     type: 'presenter-status',
     presenting: !!s.presenter,
-    followers: [...s.consumers].filter(c => c.following).length,
+    presenterIsOwner: !!s.presenter && !s.presenter.readOnly,
+    forced: !!(s.presenter && !s.presenter.readOnly),
+    followers: [...s.consumers].filter(c => c.following || c.forceFollowing).length,
   }));
 
   ws.on('message', buf => {
@@ -316,16 +324,18 @@ wss.on('connection', ws => {
     try { m = JSON.parse(raw); } catch {}
     // Bookkeeping actions are allowed from any consumer, including invitees.
     if (m && m.action === 'presence') { ws.idle = !!m.idle; broadcastPresence(s); return; }
-    if (m && m.action === 'follow')   { ws.following = !!m.following; broadcastPresenterStatus(s); return; }
-    // Presenter-state follows: invitees can receive but not emit, even in presenter mode.
-    if (!ws.readOnly && m && m.action === 'presenter-start') {
-      s.presenter = ws; ws.presenting = true; broadcastPresenterStatus(s); return;
+    if (m && m.action === 'follow')   {
+      // Invitees who are being force-followed can still send follow:false,
+      // but the relay ignores it — they can't opt out of an owner's drive.
+      if (!ws.forceFollowing) ws.following = !!m.following;
+      broadcastPresenterStatus(s); return;
     }
-    if (!ws.readOnly && m && m.action === 'presenter-stop') {
-      if (s.presenter === ws) s.presenter = null;
-      ws.presenting = false; broadcastPresenterStatus(s); return;
-    }
-    if (!ws.readOnly && m && m.action === 'presenter-state' && ws.presenting) {
+    // Presenter actions — BOTH owners and invitees may present. Only owner
+    // presentations are "forced" on invitees; an invitee's presentation is
+    // opt-in for everyone else (including other invitees AND the owner).
+    if (m && m.action === 'presenter-start') { handlePresenterStart(ws, s); return; }
+    if (m && m.action === 'presenter-stop')  { handlePresenterStop(ws, s);  return; }
+    if (m && m.action === 'presenter-state' && ws.presenting) {
       fanoutPresenterState(s, ws, m.state);
       return;
     }
@@ -340,19 +350,54 @@ wss.on('connection', ws => {
   ws.on('close', () => {
     s.consumers.delete(ws);
     log(ws.session, `consumer disconnected (remaining: ${s.consumers.size})`);
-    if (s.presenter === ws) { s.presenter = null; broadcastPresenterStatus(s); }
+    if (s.presenter === ws) { clearPresenter(s); broadcastPresenterStatus(s); }
     broadcastPresence(s);
     dropIfEmpty(ws.session);
   });
   ws.on('error', e => log(ws.session, `consumer error: ${e.message}`));
 });
 
+// Start a presentation. Anyone (owner or invitee) can start, but:
+//  - Owner presenter → every non-owner consumer is marked forceFollowing,
+//    so invitees can't opt out of the owner's drive.
+//  - Invitee presenter → no one is forced; others opt in via `follow:true`.
+// Taking over from a prior presenter revokes them with a `presenter-revoked`
+// ack so their local UI can flip back.
+function handlePresenterStart(ws, s) {
+  if (s.presenter && s.presenter !== ws) {
+    const prev = s.presenter;
+    prev.presenting = false;
+    safeSend(prev, JSON.stringify({ type: 'presenter-revoked' }));
+  }
+  s.presenter = ws;
+  ws.presenting = true;
+  const forced = !ws.readOnly;
+  for (const c of s.consumers) {
+    c.forceFollowing = forced && c !== ws;
+  }
+  broadcastPresenterStatus(s);
+}
+
+function handlePresenterStop(ws, s) {
+  if (s.presenter === ws) clearPresenter(s);
+  else ws.presenting = false;
+  broadcastPresenterStatus(s);
+}
+
+function clearPresenter(s) {
+  if (s.presenter) { s.presenter.presenting = false; }
+  s.presenter = null;
+  for (const c of s.consumers) c.forceFollowing = false;
+}
+
 function broadcastPresenterStatus(s) {
   let followers = 0;
-  for (const c of s.consumers) if (c.following) followers++;
+  for (const c of s.consumers) if (c.following || c.forceFollowing) followers++;
   const payload = JSON.stringify({
     type: 'presenter-status',
     presenting: !!s.presenter,
+    presenterIsOwner: !!s.presenter && !s.presenter.readOnly,
+    forced: !!(s.presenter && !s.presenter.readOnly),
     followers,
   });
   for (const c of s.consumers) if (c.readyState === 1) { try { c.send(payload); } catch {} }
@@ -362,7 +407,7 @@ function fanoutPresenterState(s, sender, state) {
   const payload = JSON.stringify({ type: 'presenter-state', state });
   for (const c of s.consumers) {
     if (c === sender) continue;
-    if (!c.following) continue;
+    if (!(c.following || c.forceFollowing)) continue;
     if (c.readyState !== 1) continue;
     try { c.send(payload); } catch {}
   }
