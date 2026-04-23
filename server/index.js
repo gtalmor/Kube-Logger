@@ -41,7 +41,7 @@ const sessions = new Map();
 
 function getOrCreateSession(id) {
   let s = sessions.get(id);
-  if (!s) { s = { producer: null, producerKey: null, consumers: new Set(), presenter: null, startedAt: Date.now() }; sessions.set(id, s); }
+  if (!s) { s = { producer: null, producerKey: null, consumers: new Set(), presenter: null, lastPresenterState: null, startedAt: Date.now() }; sessions.set(id, s); }
   return s;
 }
 
@@ -317,6 +317,14 @@ wss.on('connection', ws => {
     forced: !!(s.presenter && !s.presenter.readOnly),
     followers: [...s.consumers].filter(c => c.following || c.forceFollowing).length,
   }));
+  // Replay the last snapshot so a late joiner immediately matches the current
+  // view instead of staring at their pre-join state until the presenter
+  // happens to act again.
+  if (s.presenter && s.lastPresenterState && (ws.forceFollowing || ws.following)) {
+    safeSend(ws, JSON.stringify({ type: 'presenter-state', state: s.lastPresenterState }));
+  }
+  // Tell the presenter their follower count just bumped.
+  if (s.presenter && s.presenter !== ws) broadcastPresenterStatus(s);
 
   ws.on('message', buf => {
     const raw = buf.toString();
@@ -327,7 +335,13 @@ wss.on('connection', ws => {
     if (m && m.action === 'follow')   {
       // Invitees who are being force-followed can still send follow:false,
       // but the relay ignores it — they can't opt out of an owner's drive.
+      const prev = ws.following;
       if (!ws.forceFollowing) ws.following = !!m.following;
+      // Just-opted-in follower deserves a replay of the current view — they
+      // shouldn't have to wait for the presenter's next action to see anything.
+      if (!prev && ws.following && s.presenter && s.lastPresenterState) {
+        safeSend(ws, JSON.stringify({ type: 'presenter-state', state: s.lastPresenterState }));
+      }
       broadcastPresenterStatus(s); return;
     }
     // Presenter actions — BOTH owners and invitees may present. Only owner
@@ -350,7 +364,12 @@ wss.on('connection', ws => {
   ws.on('close', () => {
     s.consumers.delete(ws);
     log(ws.session, `consumer disconnected (remaining: ${s.consumers.size})`);
-    if (s.presenter === ws) { clearPresenter(s); broadcastPresenterStatus(s); }
+    const wasFollowing = ws.following || ws.forceFollowing;
+    if (s.presenter === ws) clearPresenter(s);
+    // Any follower leaving — including the presenter themselves — can change
+    // the count the presenter sees. Always re-broadcast when someone with a
+    // bearing on presenter status drops.
+    if (s.presenter || wasFollowing) broadcastPresenterStatus(s);
     broadcastPresence(s);
     dropIfEmpty(ws.session);
   });
@@ -364,6 +383,13 @@ wss.on('connection', ws => {
 // Taking over from a prior presenter revokes them with a `presenter-revoked`
 // ack so their local UI can flip back.
 function handlePresenterStart(ws, s) {
+  // Invitees cannot take over an owner's force-presentation — that would
+  // defeat the whole "force-follow" premise (invitee could just click Present
+  // and immediately become the driver). Owners can take over invitees freely.
+  if (s.presenter && s.presenter !== ws && !s.presenter.readOnly && ws.readOnly) {
+    safeSend(ws, JSON.stringify({ type: 'presenter-denied', reason: 'owner-presenting' }));
+    return;
+  }
   if (s.presenter && s.presenter !== ws) {
     const prev = s.presenter;
     prev.presenting = false;
@@ -371,6 +397,7 @@ function handlePresenterStart(ws, s) {
   }
   s.presenter = ws;
   ws.presenting = true;
+  s.lastPresenterState = null;  // new presenter, new view — drop stale cache
   const forced = !ws.readOnly;
   for (const c of s.consumers) {
     c.forceFollowing = forced && c !== ws;
@@ -387,6 +414,7 @@ function handlePresenterStop(ws, s) {
 function clearPresenter(s) {
   if (s.presenter) { s.presenter.presenting = false; }
   s.presenter = null;
+  s.lastPresenterState = null;
   for (const c of s.consumers) c.forceFollowing = false;
 }
 
@@ -404,6 +432,7 @@ function broadcastPresenterStatus(s) {
 }
 
 function fanoutPresenterState(s, sender, state) {
+  s.lastPresenterState = state;
   const payload = JSON.stringify({ type: 'presenter-state', state });
   for (const c of s.consumers) {
     if (c === sender) continue;

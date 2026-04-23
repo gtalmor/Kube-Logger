@@ -233,6 +233,100 @@ test('late-joining invitee is force-followed into an ongoing owner presentation'
   owner.close(); invitee.close();
 });
 
+test('late joiner immediately receives the cached presenter-state', { timeout: TIMEOUT }, async () => {
+  // If the owner pushed state BEFORE the invitee joined, the invitee should
+  // still get the current view on connect — not sit with a blank screen until
+  // the owner happens to act again.
+  const session = sid();
+  const owner = await openConsumer(session);
+  await drainSetup(owner);
+  owner.send(JSON.stringify({ action: 'presenter-start' }));
+  await sleep(30);
+  owner.send(JSON.stringify({ action: 'presenter-state', state: { search: 'preset-view', hideTrace: true } }));
+  await sleep(50);
+
+  const invitee = await redeemInvitee(owner, session);
+  // Replay should arrive without the owner doing anything further.
+  const got = await waitForMessage(invitee, m => m.type === 'presenter-state', 800);
+  assert.equal(got.state.search, 'preset-view');
+  assert.equal(got.state.hideTrace, true);
+
+  owner.close(); invitee.close();
+});
+
+test('invitee cannot take over an owner who is force-presenting', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const owner = await openConsumer(session);
+  await drainSetup(owner);
+  const invitee = await redeemInvitee(owner, session);
+  await drainSetup(invitee);
+
+  owner.send(JSON.stringify({ action: 'presenter-start' }));
+  await waitForMessage(invitee, m => m.type === 'presenter-status' && m.presenting);
+
+  // Invitee tries to take over. Relay should deny — owner stays presenter.
+  invitee.send(JSON.stringify({ action: 'presenter-start' }));
+  const denied = await waitForMessage(invitee, m => m.type === 'presenter-denied', 800);
+  assert.equal(denied.reason, 'owner-presenting');
+
+  // Owner should NOT have been revoked.
+  await assert.rejects(
+    waitForMessage(owner, m => m.type === 'presenter-revoked', 300),
+    /timeout/,
+  );
+
+  // And owner can still drive — invitee still force-followed.
+  owner.send(JSON.stringify({ action: 'presenter-state', state: { search: 'still-owner' } }));
+  const got = await waitForMessage(invitee, m => m.type === 'presenter-state', 800);
+  assert.equal(got.state.search, 'still-owner');
+
+  owner.close(); invitee.close();
+});
+
+test('follower opting in mid-presentation receives the cached state immediately', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const owner = await openConsumer(session);
+  await drainSetup(owner);
+  const inv1 = await redeemInvitee(owner, session);
+  const inv2 = await redeemInvitee(owner, session);
+  await drainSetup(inv1); await drainSetup(inv2);
+
+  inv1.send(JSON.stringify({ action: 'presenter-start' }));
+  await sleep(30);
+  inv1.send(JSON.stringify({ action: 'presenter-state', state: { search: 'current-view' } }));
+  await sleep(50);
+
+  // inv2 opts in now — should get the cached view as soon as they follow.
+  inv2.send(JSON.stringify({ action: 'follow', following: true }));
+  const got = await waitForMessage(inv2, m => m.type === 'presenter-state', 800);
+  assert.equal(got.state.search, 'current-view');
+
+  owner.close(); inv1.close(); inv2.close();
+});
+
+test('presenter follower-count updates when a follower joins or leaves', { timeout: TIMEOUT }, async () => {
+  const session = sid();
+  const owner = await openConsumer(session);
+  await drainSetup(owner);
+  owner.send(JSON.stringify({ action: 'presenter-start' }));
+
+  // First status: just the owner presenting, 0 followers.
+  const s0 = await waitForMessage(owner, m => m.type === 'presenter-status' && m.presenting);
+  assert.equal(s0.followers, 0);
+
+  // An invitee joins — they're auto-forcefollowed, presenter should see 1.
+  const invitee = await redeemInvitee(owner, session);
+  const s1 = await waitForMessage(owner, m => m.type === 'presenter-status' && m.followers === 1, 1000);
+  assert.equal(s1.followers, 1);
+
+  // Invitee disconnects — presenter's follower count should drop to 0.
+  invitee.close();
+  const s2 = await waitForMessage(owner, m => m.type === 'presenter-status' && m.followers === 0, 1000);
+  assert.equal(s2.followers, 0);
+
+  owner.close();
+});
+
 test('presenter-state does NOT echo to the sender', { timeout: TIMEOUT }, async () => {
   const session = sid();
   const owner = await openConsumer(session);

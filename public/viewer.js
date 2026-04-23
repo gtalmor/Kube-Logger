@@ -1790,6 +1790,9 @@ function connect(){
       case'presenter-revoked':
         onPresenterRevoked();
         break;
+      case'presenter-denied':
+        onPresenterDenied(m);
+        break;
       case'invite-created':
         ShareView.onInviteCreated(m);
         break;
@@ -1949,6 +1952,56 @@ S.presenting  = false;
 S.following   = false;  // our local opt-in flag
 S.forced      = false;  // relay flagged this presentation as owner-forced
 S.currentTraceReqId = null;
+// Pre-follow snapshot of the user's own state, restored when follow ends so
+// the presenter's highlights / hidden patterns don't permanently clobber the
+// follower's local view.
+S._preFollowState = null;
+
+function saveLocalStateBeforeFollow() {
+  if (S._preFollowState) return;
+  S._preFollowState = {
+    highlights: [...S.highlights],
+    hiddenPatterns: [...S.hiddenPatterns],
+    hiddenExecIds: [...S.hiddenExecIds],
+    search: S.search,
+    level: {...S.level},
+    pod: {...S.pod},
+    req: {...S.req},
+    hideTrace: !!S.hideTrace,
+    tracePanelReqId: S.currentTraceReqId,
+  };
+}
+
+function restoreLocalStateAfterFollow() {
+  if (!S._preFollowState) return;
+  const st = S._preFollowState;
+  S._preFollowState = null;
+  S.highlights = st.highlights;
+  S.hiddenPatterns = st.hiddenPatterns;
+  S.hiddenExecIds = new Set(st.hiddenExecIds);
+  S.search = st.search;
+  S.level = st.level; S.pod = st.pod; S.req = st.req;
+  S.hideTrace = st.hideTrace;
+  localStorage.setItem(HIDDEN_KEY, JSON.stringify(S.hiddenPatterns));
+  localStorage.setItem(HIGHLIGHT_KEY, JSON.stringify(S.highlights));
+  $('searchInput').value = S.search;
+  const ht = $('hideTrace');
+  ht.classList.toggle('active', S.hideTrace);
+  ht.textContent = S.hideTrace ? 'Show TRACE' : 'Hide TRACE';
+  refreshAllTri();
+  rebuildHiddenReqIds();
+  updateFlow();
+  updateHiddenBtn();
+  updateHighlightBtn();
+  rebuildFiltered();
+  fullRender();
+  // Restore trace panel to whatever the user had open (or close if nothing).
+  if (st.tracePanelReqId && st.tracePanelReqId !== S.currentTraceReqId) {
+    openTrace(st.tracePanelReqId, { fromPresenter: true });
+  } else if (!st.tracePanelReqId && S.currentTraceReqId) {
+    closeTrace({ fromPresenter: true });
+  }
+}
 
 function onPresenterStatus(m) {
   const presenting       = !!m.presenting;
@@ -1959,20 +2012,55 @@ function onPresenterStatus(m) {
     return;
   }
   // Force-follow applies to invitees when the presenter is the owner.
-  const forced = presenting && presenterIsOwner && !!RO_TOKEN;
+  const forced   = presenting && presenterIsOwner && !!RO_TOKEN;
+  const wasForced    = S.forced;
+  const wasPresenting = S._lastPresenting;
+  const wasFollowing = S.following || S.forced;
+  const willFollow   = forced || S.following;
+  // Save the user's own view the moment following begins — restore when it ends.
+  if (!wasFollowing && willFollow) saveLocalStateBeforeFollow();
+  if (wasFollowing && !willFollow) restoreLocalStateAfterFollow();
+
   S.forced = forced;
+  const pb = $('presentBtn');
   if (forced) {
     if (!S.following) S.following = true;  // take effect immediately
     $('followBtn').style.display = 'none';  // can't opt out
+    // Invitees can't take over an owner's force-presentation — hide the button
+    // entirely so they don't find a control that would just be denied.
+    pb.style.display = 'none';
     showForcedBanner(true);
+    if (!wasForced && !S._suppressNextPresenterToast) toast('Owner started presenting — your view is now driven');
+    S._suppressNextPresenterToast = false;
   } else {
     showForcedBanner(false);
+    pb.style.display = '';
     const fb = $('followBtn');
     fb.style.display = presenting ? '' : 'none';
     fb.textContent   = S.following ? '👀 Following' : '👀 Follow';
     fb.classList.toggle('active', S.following);
+    // Non-forced presenter just started (e.g. another invitee) — nudge once.
+    if (presenting && !wasPresenting && !S._suppressNextPresenterToast) {
+      toast('Someone is presenting — click Follow to track their view');
+    }
+    S._suppressNextPresenterToast = false;
   }
   if (!presenting && S.following && !forced) { S.following = false; toast('Presenter ended'); }
+  S._lastPresenting = presenting;
+}
+
+// Relay denied our presenter-start (e.g. an owner is already force-presenting
+// and we're an invitee). Flip our local UI back and let the user know.
+function onPresenterDenied(m) {
+  if (S.presenting) {
+    S.presenting = false;
+    const b = $('presentBtn');
+    if (b) { b.classList.remove('active'); b.textContent = '🫱 Present'; }
+  }
+  const why = m && m.reason === 'owner-presenting'
+    ? 'The owner is presenting — you can\'t take over.'
+    : 'Can\'t start presenting right now.';
+  toast(why);
 }
 
 function showForcedBanner(on) {
@@ -1995,6 +2083,9 @@ function onPresenterRevoked() {
   S.presenting = false;
   const b = $('presentBtn');
   if (b) { b.classList.remove('active'); b.textContent = '🫱 Present'; }
+  // The presenter-status that follows will also want to toast — swallow it,
+  // one message is enough.
+  S._suppressNextPresenterToast = true;
   toast('Presentation taken over by the owner');
 }
 
