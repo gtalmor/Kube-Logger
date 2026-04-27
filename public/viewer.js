@@ -1751,6 +1751,14 @@ function addLive(raw,ns){
     if(p.ns){const hadNs=S.nsSeen.has(p.ns);S.nsSeen.add(p.ns);if(!hadNs){ensureNsColor(p.ns);renderNsLegend();}}
     if(p.pod){const had=S.pods.has(p.pod);S.pods.add(p.pod);if(!had)populateFilters();}
     if(p.reqId){S.reqs.set(p.reqId,(S.reqs.get(p.reqId)||0)+1);if(S.lines.length%100===0)populateFilters();}
+    // Live-extend the hidden-reqId index. If a new flow line arrives for an
+    // already-hidden execution, propagate its reqId so subsequent non-flow
+    // lines sharing that reqId stay hidden too. Without this, only lines
+    // present at hideFlowExec() time get caught by reqId.
+    if(p.flowExecId&&S.hiddenExecIds.has(p.flowExecId)&&p.reqId){
+      if(!S._hiddenReqIds)S._hiddenReqIds=new Set();
+      S._hiddenReqIds.add(p.reqId);
+    }
     appendLive(p);
   }
 }
@@ -1814,8 +1822,16 @@ function connect(){
         break;
 
       case'init':
-        if(m.auth&&(m.auth.ok||m.auth.authenticated)){
-          $('cLabel').textContent=m.auth.arn?m.auth.arn.split('/').pop():'Authenticated';
+        if(m.auth){
+          if(m.auth.ok||m.auth.authenticated){
+            $('cLabel').textContent=m.auth.arn?m.auth.arn.split('/').pop():'Authenticated';
+          }else if(agentConnected){
+            $('cLabel').textContent='SSO expired';
+          }
+          // Drive the main-page SSO banner from init too, so a fresh page-load
+          // (or relay reconnect) reflects current auth state without waiting
+          // for a separate auth-status message.
+          updateSsoBanner(m.auth);
         }
         // Reloading mid-capture: make the log area visible so lines land on screen.
         if(m.capturing){
@@ -1883,7 +1899,9 @@ function connect(){
         // Don't let a late auth-status overwrite the disconnected label if the
         // agent isn't around right now — the drawer still gets the state update.
         if(agentConnected){
-          $('cLabel').textContent=(m.ok||m.authenticated)?(m.arn?m.arn.split('/').pop():'Auth OK'):'Not authed';
+          $('cLabel').textContent=(m.ok||m.authenticated)
+            ?(m.arn?m.arn.split('/').pop():'Auth OK')
+            :'SSO expired';
         }
         updateSsoBanner(m);
         Drawer.onAuthStatus(m);
@@ -1916,23 +1934,49 @@ function setAgentConnected(on,label){
   agentConnected=on;
   $('cDot').className='dot '+(on?'ok':'fail');
   if(label)$('cLabel').textContent=label;
-  if(!on)hideSsoBanner();
+  // Re-evaluate the banner: hide while agent is gone, but DON'T clear the
+  // cached last-known auth so the banner reappears as soon as the agent is
+  // back if SSO is still expired.
+  renderSsoBanner();
 }
 
 // Prominent banner across the top when the agent is around but SSO isn't —
 // keeps the user from wondering why their log stream quietly stopped.
+// We cache the last-known auth state so a transient agent flicker can't
+// silently hide the banner while the user still needs to re-SSO.
 let ssoLastProfile='';
+let ssoLastAuth=null;  // { ok, err, profile, expiresAt }
 function updateSsoBanner(m){
-  const ok=m.ok||m.authenticated;
+  if(!m)return;
+  const ok=!!(m.ok||m.authenticated);
+  ssoLastAuth={
+    ok,
+    err:(m.err||m.error||'').toString(),
+    profile:m.profile||(ssoLastAuth&&ssoLastAuth.profile)||'',
+    expiresAt:m.expiresAt||(ssoLastAuth&&ssoLastAuth.expiresAt)||null,
+  };
   if(m.profile)ssoLastProfile=m.profile;
-  if(ok){hideSsoBanner();return;}
-  if(!agentConnected){hideSsoBanner();return;}
+  renderSsoBanner();
+}
+function renderSsoBanner(){
   const b=$('ssoBanner');if(!b)return;
-  const err=(m.err||m.error||'').toString();
+  // Hide if we have no auth info, the last known state was good, or the
+  // agent is off (no point showing a re-login button when the agent that
+  // would handle it is gone — cLabel says "agent disconnected" instead).
+  if(!ssoLastAuth||ssoLastAuth.ok||!agentConnected){
+    b.classList.remove('v');
+    return;
+  }
+  const err=ssoLastAuth.err;
   $('ssoInfo').textContent=err?`SSO expired — ${err.slice(0,120)}`:'SSO expired — re-authenticate to keep streaming';
   b.classList.add('v');
 }
-function hideSsoBanner(){const b=$('ssoBanner');if(b)b.classList.remove('v');}
+function hideSsoBanner(){
+  // Force-clear the cache (called on successful re-login) so banner doesn't
+  // come back once the agent confirms auth.
+  ssoLastAuth=null;
+  const b=$('ssoBanner');if(b)b.classList.remove('v');
+}
 // ── Presence pill ───────────────────────────────────────────────────
 // The relay counts connected consumers and marks each active/idle based on
 // the browser's visibilitychange events. Pill is hidden when it's only you.
