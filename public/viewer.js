@@ -66,6 +66,10 @@ const HIDDEN_KEY='kube-logger-hidden-patterns';
 const HIGHLIGHT_KEY='kube-logger-highlights';
 const PRESETS_KEY='kube-logger-filter-presets';
 const HI_COLORS=['#e6db74','#a6e22e','#66d9ef','#fd971f','#ae81ff','#f92672','#e6db74','#a1efe4'];
+// Cap rendered rows in #lc so the tab stays responsive on multi-hour sessions.
+// S.lines is left unbounded — idx is positional and used by errIdx/filtered/scrollTo,
+// which re-injects from S.lines when a target line isn't in the DOM.
+const MAX_DOM_ROWS=10000;
 const S = {
   ws:null, lines:[], raw:[], filtered:[], errIdx:[], curErr:-1,
   pods:new Set(), reqs:new Map(), flowNodes:[],
@@ -623,9 +627,24 @@ function rebuildFiltered(){
   }
 }
 
+function trimDom(){
+  const c=$('lc');
+  let excess=c.childElementCount-MAX_DOM_ROWS;
+  while(excess-->0&&c.firstChild)c.removeChild(c.firstChild);
+}
+
 function fullRender(){
   const c=$('lc');let h='';let prev=null;
-  for(const i of S.filtered){const l=S.lines[i];try{h+=lineHtml(l,S.search,prev);}catch(e){console.error('lineHtml error at',i,e);h+=`<div class="ll lERROR" data-i="${i}"><span class="ln">${i+1}</span><span class="lm" style="color:var(--error)">[render error: ${e.message}]</span></div>`;}prev=l;}
+  // Only render the tail when filtered exceeds the DOM cap; older rows are
+  // re-injected on demand by scrollTo. prev is seeded from the line just
+  // before the slice so the first rendered row's multi-line context is correct.
+  const start=Math.max(0,S.filtered.length-MAX_DOM_ROWS);
+  if(start>0)prev=S.lines[S.filtered[start-1]]||null;
+  for(let k=start;k<S.filtered.length;k++){
+    const i=S.filtered[k];const l=S.lines[i];
+    try{h+=lineHtml(l,S.search,prev);}catch(e){console.error('lineHtml error at',i,e);h+=`<div class="ll lERROR" data-i="${i}"><span class="ln">${i+1}</span><span class="lm" style="color:var(--error)">[render error: ${e.message}]</span></div>`;}
+    prev=l;
+  }
   c.innerHTML=h;
   c.classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';
   updateStats();updateErrBanner();updateFlow();
@@ -656,6 +675,7 @@ function flushBuf(){
   let prev=S.filtered.length>S.buf.length?S.lines[S.filtered[S.filtered.length-S.buf.length-1]]:null;
   for(const l of S.buf){try{h+=lineHtml(l,S.search,prev);}catch(e){console.error('lineHtml error:',e);h+=`<div class="ll lERROR" data-i="${l.idx}"><span class="ln">${l.idx+1}</span><span class="lm" style="color:var(--error)">[render error: ${e.message}]</span></div>`;}prev=l;}
   c.insertAdjacentHTML('beforeend',h);S.buf=[];
+  trimDom();
   if(S.autoScroll)c.scrollTop=c.scrollHeight;
   updateStats();
   if(S.filtered.length%50===0){updateFlow();updateErrBanner();}
