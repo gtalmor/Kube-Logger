@@ -716,7 +716,10 @@
   <div class="tp-resize" id="tpResize" title="Drag to resize"></div>
   <div class="tp-header">
     <span class="tp-title" id="tpTitle">Flow Trace</span>
-    <button class="btn" id="tpClose">&times;</button>
+    <span style="display:flex;gap:6px">
+      <button class="btn" id="tpExport" title="Download trace as JSON — share with AI for slow-system investigation">Export JSON</button>
+      <button class="btn" id="tpClose">&times;</button>
+    </span>
   </div>
   <div class="tp-body" id="tpBody"></div>
 </div>

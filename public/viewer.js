@@ -1550,6 +1550,92 @@ function closeTrace(opts){
   if(!(opts&&opts.fromPresenter))presentSoon();
 }
 
+// Build a JSON snapshot of everything the trace panel shows + all related log
+// lines, so the user can share it with an AI / coworker for slow-system
+// investigation. Mirrors openTrace's data assembly so what you see is what
+// you export. Includes raw log text for grep-ability + parsed fields so a
+// reader doesn't have to reparse the stern output.
+function buildTraceExport(reqId){
+  const reqLines=S.lines.filter(l=>l&&l.reqId===reqId);
+  const flowExecIds=new Set();
+  for(const l of reqLines)if(l.flowExecId)flowExecIds.add(l.flowExecId);
+  const relatedLines=[];
+  if(flowExecIds.size){
+    for(const l of S.lines){
+      if(l&&l.flowExecId&&flowExecIds.has(l.flowExecId)&&l.reqId!==reqId)relatedLines.push(l);
+    }
+  }
+  const allLines=[...reqLines,...relatedLines].sort((a,b)=>(a.timestamp||'').localeCompare(b.timestamp||''));
+
+  const flows=new Map();
+  for(const l of allLines){
+    if(!l.flowExecId)continue;
+    if(!flows.has(l.flowExecId))flows.set(l.flowExecId,{execId:l.flowExecId,name:l.flowName,nodes:[],failures:[],errors:[]});
+    const f=flows.get(l.flowExecId);
+    if(!f.name&&l.flowName)f.name=l.flowName;
+    if(l.flowNode)f.nodes.push({node:l.flowNode,state:l.flowState,next:l.flowNext,reason:l.flowFailReason,lineIdx:l.idx,ts:l.timestamp});
+    if(l.failNodeId)f.failures.push({nodeId:l.failNodeId,label:l.failNodeLabel,lineIdx:l.idx});
+    if(l.apiError||l.isFlowError)f.errors.push({msg:l.apiError||l.msg,lineIdx:l.idx,level:l.level});
+  }
+
+  const flowsOut=[];
+  for(const f of flows.values()){
+    const wf=buildWaterfall(f);
+    if(!wf){flowsOut.push({...f,waterfall:null});continue;}
+    const idle=summarizeIdle(wf.bars);
+    const active=Math.max(0,wf.total-idle.totalMs);
+    const typeSummary=summarizeByType(wf.bars).map(r=>({name:r.name,count:r.count,meanMs:r.mean,maxMs:r.max,totalMs:r.total,titles:[...r.titles]}));
+    flowsOut.push({
+      execId:f.execId, name:f.name,
+      nodes:f.nodes, failures:f.failures, errors:f.errors,
+      waterfall:{
+        totalMs:wf.total, activeMs:active, idleMs:idle.totalMs,
+        idleGaps:idle.gaps,
+        bars:wf.bars.map(b=>({node:b.node,title:b.title,id:b.id,startMs:b.start-wf.minStart,durMs:b.dur,lineIdx:b.lineIdx,state:b.state})),
+        typeSummary,
+      },
+    });
+  }
+
+  // Trim to fields that matter for analysis — drop the per-line `json` blob
+  // (often huge, mostly redundant with `raw`), keep parsed fields + raw text.
+  const linesOut=allLines.map(l=>({
+    idx:l.idx, ts:l.timestamp, ns:l.ns, pod:l.pod, container:l.container,
+    level:l.level, type:l.type, msg:l.msg, reqId:l.reqId,
+    flowExecId:l.flowExecId, flowName:l.flowName, flowNode:l.flowNode,
+    flowState:l.flowState, flowNext:l.flowNext, flowFailReason:l.flowFailReason,
+    failNodeId:l.failNodeId, failNodeLabel:l.failNodeLabel,
+    apiError:l.apiError, isFlowError:l.isFlowError,
+    method:l.method, path:l.path, status:l.status, // HTTP fields
+    raw:l.raw,
+  }));
+
+  return {
+    schema:'kube-logger-trace-export/v1',
+    exportedAt:new Date().toISOString(),
+    captureStart:S.start||null,
+    reqId,
+    flowExecIds:[...flowExecIds],
+    counts:{lines:linesOut.length, reqLines:reqLines.length, relatedLines:relatedLines.length, flows:flowsOut.length},
+    flows:flowsOut,
+    lines:linesOut,
+  };
+}
+
+function downloadTraceExport(reqId){
+  if(!reqId){toast('No trace open');return;}
+  const data=buildTraceExport(reqId);
+  const json=JSON.stringify(data,null,2);
+  const blob=new Blob([json],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=`trace-${reqId.slice(0,8)}-${new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)}.json`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  toast(`Exported ${data.counts.lines} lines · ${data.counts.flows} flow${data.counts.flows===1?'':'s'}`);
+}
+
 // ── Trace panel resize ──────────────────────────────────────────────
 // Drag the left edge to widen / narrow. Preferred width persists.
 (function wireTraceResize(){
@@ -2384,6 +2470,7 @@ $('clearBtn').addEventListener('click',()=>{
   }
 });
 $('tpClose').addEventListener('click',closeTrace);
+$('tpExport').addEventListener('click',()=>downloadTraceExport(S.currentTraceReqId));
 $('ipClose').addEventListener('click',closeInspector);
 $('ipExpand').addEventListener('click',()=>inspectorSetAll(false));
 $('ipCollapse').addEventListener('click',()=>inspectorSetAll(true));
