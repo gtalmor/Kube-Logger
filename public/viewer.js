@@ -298,6 +298,52 @@ function durBucket(ms){
   return 'slow';
 }
 
+// Detect the "proxy / authId hop": an api_be bar whose window contains an
+// outbound POST to /flow/execute/... — i.e. the flow re-entering itself
+// (or another flow) over HTTP just to attach a Bearer header from request.body.authId.
+// Returns the matched http line, or null. This is the most expensive routine
+// pattern in the authentication flow — each hit means the engine processed the
+// same request twice (full body re-serialized through the service mesh).
+function detectProxyHop(bar){
+  if(!bar||bar.node!=='api_be')return null;
+  // Title-based fast path — engineers literally label this node "Proxy" Call Internally.
+  const titleHit=(bar.title||'').toLowerCase().includes('proxy');
+  const startMs=bar.start, endMs=bar.start+bar.dur;
+  for(const l of S.lines){
+    if(!l||l.type!=='http'||!l.timestamp)continue;
+    const t=Date.parse(l.timestamp);
+    if(Number.isNaN(t)||t<startMs||t>endMs)continue;
+    if((l.method||'').toUpperCase()==='POST'&&/\/flow\/execute\//.test(l.path||'')){
+      return{path:l.path,status:l.status,size:l.size,lineIdx:l.idx};
+    }
+  }
+  return titleHit?{path:'(no captured http line)',status:null,size:0,lineIdx:null}:null;
+}
+
+// Detect the authId tax: a child flow exec with the same flowName as the
+// outer exec, whose events fall inside the outer's window. When present, the
+// outer flow re-invoked itself via the proxy hop; the "tax" is the outer
+// total minus the inner total — work the engine did *outside* the real
+// authentication logic (script eval, HTTP roundtrip, framing overhead).
+function detectAuthIdReentry(outerFlow, outerWf, flowOrder){
+  if(!outerFlow||!outerWf||!outerFlow.name)return null;
+  const oStart=outerWf.minStart, oEnd=oStart+outerWf.total;
+  let best=null;
+  for(const f of flowOrder){
+    if(f===outerFlow||f.execId===outerFlow.execId)continue;
+    if(f.name!==outerFlow.name)continue;
+    const cwf=buildWaterfall(f);
+    if(!cwf)continue;
+    const cStart=cwf.minStart, cEnd=cStart+cwf.total;
+    // Must be nested inside outer (with a little slack for clock skew).
+    if(cStart<oStart-50||cEnd>oEnd+50)continue;
+    if(!best||cwf.total>best.cwf.total)best={f,cwf};
+  }
+  if(!best)return null;
+  const tax=Math.max(0,outerWf.total-best.cwf.total);
+  return{childExecId:best.f.execId,childTotal:best.cwf.total,taxMs:tax};
+}
+
 // Render the detail block that appears under a waterfall row when expanded:
 // what happened during this node's [start, end] window — log lines, HTTP
 // calls, DB query timings, and gaps of silence that usually indicate the
@@ -381,10 +427,12 @@ function renderNodeDetail(bar, reqId, parentExecId) {
         const offsetPct = cwf.total ? ((cb.start - cwf.minStart) / cwf.total * 100) : 0;
         const widthPct  = cwf.total ? Math.max(0.5, cb.dur / cwf.total * 100) : 100;
         const childDetailId = `wfd-${cf.execId}-${bi}`;
+        const cHop = detectProxyHop(cb);
+        const cHopBadge = cHop ? `<span class="wf-hop" title="api_be re-POSTs to ${esc(cHop.path||'')} — authId/proxy hop">authId hop</span>` : '';
         h += `<div class="wf-row" data-expand="${childDetailId}" title="${esc(cb.node)} — ${fmtMs(cb.dur)} (${cb.state})">`
           +  `<span class="wf-caret">▸</span>`
-          +  `<span class="wf-name">${esc(cb.node)}</span>`
-          +  `<span class="wf-track"><span class="wf-bar dur-${durBucket(cb.dur)}${cb.state==='failed'?' failed':''}" style="left:${offsetPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span></span>`
+          +  `<span class="wf-name">${esc(cb.node)}${cHopBadge}</span>`
+          +  `<span class="wf-track"><span class="wf-bar dur-${durBucket(cb.dur)}${cb.state==='failed'?' failed':''}${cHop?' hop':''}" style="left:${offsetPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span></span>`
           +  `<span class="wf-dur">${fmtMs(cb.dur)}</span>`
           +  `</div>`
           +  `<div class="wf-detail" id="${childDetailId}">${renderNodeDetail(cb, reqId, cf.execId)}</div>`;
@@ -1397,7 +1445,11 @@ function openTrace(reqId,opts){
     const idleHtml=idle.totalMs>0
       ? ` · <span title="${idle.gaps.length} gap${idle.gaps.length===1?'':'s'} > 500ms — typically user input on a form or inter-request waits">active ${fmtMs(active)} · idle ${fmtMs(idle.totalMs)}</span>`
       : '';
-    h+=`<div class="tp-section"><div class="tp-section-label">Timing — ${esc(f.name||'flow')} <span class="tp-exec-id">${esc(f.execId.slice(0,8))}</span> · total ${fmtMs(wf.total)}${idleHtml} · click a row to dive in</div>`;
+    const reentry=detectAuthIdReentry(f,wf,flowOrder);
+    const taxHtml=reentry
+      ? ` · <span class="tp-authid-tax" title="A child exec of the same flow (${esc(reentry.childExecId.slice(0,8))}) ran inside this one — the authId/proxy hop. Tax = outer total − inner total: the overhead of doing the HTTP roundtrip + extra script/log work instead of executing the flow directly.">authId tax ${fmtMs(reentry.taxMs)} (inner ${fmtMs(reentry.childTotal)})</span>`
+      : '';
+    h+=`<div class="tp-section"><div class="tp-section-label">Timing — ${esc(f.name||'flow')} <span class="tp-exec-id">${esc(f.execId.slice(0,8))}</span> · total ${fmtMs(wf.total)}${idleHtml}${taxHtml} · click a row to dive in</div>`;
     // Per-type summary — answers "are all script_be_v2 calls the slow part?"
     const typeSummary=summarizeByType(wf.bars);
     if(typeSummary.length){
@@ -1448,11 +1500,13 @@ function openTrace(reqId,opts){
       const widthPct=wf.total?Math.max(0.5,b.dur/wf.total*100):100;
       const detailId=`wfd-${bi}`;
       const display=b.title||b.node;
+      const hop=detectProxyHop(b);
+      const hopBadge=hop?`<span class="wf-hop" title="api_be re-POSTs to ${esc(hop.path||'')} — this is the authId/proxy hop. Doubles the request's flow execution.">authId hop</span>`:'';
       const titleAttr=`${b.title?b.title+' • ':''}${b.node}${b.id?' #'+b.id:''} — ${fmtMs(b.dur)} (${b.state}) · click to expand`;
       h+=`<div class="wf-row" data-expand="${detailId}" title="${esc(titleAttr)}">`
         +`<span class="wf-caret" data-caret-for="${detailId}">▸</span>`
-        +`<span class="wf-name">${esc(display)}</span>`
-        +`<span class="wf-track"><span class="wf-bar dur-${durBucket(b.dur)}${b.state==='failed'?' failed':''}" style="left:${offsetPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span></span>`
+        +`<span class="wf-name">${esc(display)}${hopBadge}</span>`
+        +`<span class="wf-track"><span class="wf-bar dur-${durBucket(b.dur)}${b.state==='failed'?' failed':''}${hop?' hop':''}" style="left:${offsetPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span></span>`
         +`<span class="wf-dur">${fmtMs(b.dur)}</span>`
         +`</div>`
         +`<div class="wf-detail" id="${detailId}">${renderNodeDetail(b,reqId,f.execId)}</div>`;

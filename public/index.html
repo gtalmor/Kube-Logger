@@ -282,6 +282,18 @@
   .wf-bar.dur-warn { background:var(--warn); }
   .wf-bar.dur-slow { background:var(--error); }
   .wf-bar.failed   { background:var(--error); outline:1px solid var(--error); }
+  /* Outline a bar when its window contains the proxy/authId re-POST.
+     The bar's color still encodes duration; the outline tags the *kind* of work. */
+  .wf-bar.hop      { outline:1px dashed var(--warn); outline-offset:1px; }
+  /* Inline pill rendered next to the api_be node name when it's the authId hop. */
+  .wf-hop {
+    display:inline-block; margin-left:6px; padding:0 5px;
+    font-size:9px; line-height:13px; font-weight:600; letter-spacing:.3px;
+    color:var(--bg); background:var(--warn); border-radius:2px; vertical-align:middle;
+    font-family:'SF Mono',monospace; text-transform:uppercase;
+  }
+  /* Tax callout in the per-execution timing label (outer flow). */
+  .tp-authid-tax { color:var(--warn); font-weight:600; }
   .wf-dur { width:60px; text-align:right; color:var(--muted); font-family:'SF Mono',monospace; flex-shrink:0; }
   /* Per-type rollup at the top of each waterfall — answers 'across all the
      api_be calls in this trace, what was the total / mean / max?' */
