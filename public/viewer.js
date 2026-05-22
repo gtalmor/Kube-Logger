@@ -558,6 +558,27 @@ function buildWaterfall(flow){
   return { minStart, total:maxEnd-minStart, bars };
 }
 
+// A nested_flow bar's window contains its inline children (same-exec library
+// nodes that ran inside it). At the top level, those children otherwise show
+// up as flat siblings of the nested_flow — duplicating time visually since
+// the user can drill into the nested_flow's "Inline contents" to see them.
+// Return only bars NOT fully contained inside another bar's window. If a
+// nested_flow is inside another nested_flow, the inner one is hidden too;
+// drill-down recursion surfaces it.
+function filterTopLevelBars(bars){
+  const nfBars=bars.filter(b=>b.node==='nested_flow');
+  if(!nfBars.length)return bars;
+  return bars.filter(b=>{
+    for(const nf of nfBars){
+      if(b===nf)continue;
+      const bEnd=b.start+b.dur, nfEnd=nf.start+nf.dur;
+      // ±5ms slack for clock skew across pre/done events.
+      if(b.start>=nf.start-5&&bEnd<=nfEnd+5)return false;
+    }
+    return true;
+  });
+}
+
 function extractFlow(lines){
   const nodes=[],seen=new Set();
   const nr=/\[([^\]]+)\]\s+(\S+)\s+-\s+Node\s+(.+?)\s+is\s+in\s+(\w+)\s+state(?:,\s+next\s+node\s+is\s+(\S+))?/;
@@ -1519,7 +1540,7 @@ function openTrace(reqId,opts){
       h+='</div>';
     }
     h+='<div class="wf">';
-    const sortedBars=[...wf.bars].sort((a,b)=>a.start-b.start);
+    const sortedBars=filterTopLevelBars([...wf.bars].sort((a,b)=>a.start-b.start));
     for(let bi=0;bi<sortedBars.length;bi++){
       const b=sortedBars[bi];
       // Insert an idle marker row when there's a gap > 500ms before this bar.
@@ -1682,6 +1703,28 @@ function buildBarContext(bar, reqId, parentExecId){
       bars:cwf.bars.map(cb=>enrichBar(cb,cwf.minStart,reqId,cf.execId)),
     });
   }
+
+  // Inline contents — for nested_flow bars, same-exec library nodes that ran
+  // inside this bar's window. Mirrors the "Inline contents" mini-waterfall in
+  // the trace panel so the export carries the drill-down even when no new
+  // flowExecId was spawned.
+  let inlineBars=null;
+  if(bar.node==='nested_flow'){
+    const inlineEvents=[];
+    for(const l of S.lines){
+      if(!l||!l.flowExecId||l.flowExecId!==parentExecId)continue;
+      if(!l.flowNode||!l.flowState)continue;
+      if(l.idx===bar.lineIdx)continue;
+      if(!inWindow(l))continue;
+      inlineEvents.push({node:l.flowNode,state:l.flowState,lineIdx:l.idx,ts:l.timestamp});
+    }
+    if(inlineEvents.length){
+      const iwf=buildWaterfall({execId:parentExecId,name:'inline',nodes:inlineEvents});
+      if(iwf&&iwf.bars.length){
+        inlineBars=iwf.bars.map(cb=>enrichBar(cb,iwf.minStart,reqId,parentExecId));
+      }
+    }
+  }
   const selfMs=Math.max(0, bar.dur - childMs);
 
   // Lines within the bar window — used for DB pair detection and gap detection.
@@ -1714,6 +1757,7 @@ function buildBarContext(bar, reqId, parentExecId){
   return {
     selfMs, childMs,
     nestedFlows,
+    ...(inlineBars?{inlineBars}:{}),
     dbCalls:dbCalls.sort((a,b)=>b.durMs-a.durMs),
     httpCalls:httpLines.map(l=>({status:l.status,method:l.method,path:l.path,sizeB:l.size,lineIdx:l.idx})),
     gaps:gaps.sort((a,b)=>b.ms-a.ms),
@@ -1770,10 +1814,12 @@ function buildTraceExport(reqId){
         totalMs:wf.total, activeMs:active, idleMs:idle.totalMs,
         idleGaps:idle.gaps,
         // Each bar carries the same drill-down data the panel shows on click:
-        // nestedFlows (recursive), dbCalls, httpCalls, gaps, selfMs vs childMs.
-        // For a "nested_flow took 4.2s" bar, nestedFlows[].bars[] tells you
-        // what actually ran inside, not just the wrapper name.
-        bars:wf.bars.map(b=>enrichBar(b, wf.minStart, reqId, f.execId)),
+        // nestedFlows (recursive), inlineBars (same-exec children of a
+        // nested_flow), dbCalls, httpCalls, gaps, selfMs vs childMs. Top-level
+        // bars are filtered to exclude those fully contained inside a
+        // nested_flow's window — they appear under inlineBars instead, mirror-
+        // ing the viewer so timings don't double-count.
+        bars:filterTopLevelBars(wf.bars).map(b=>enrichBar(b, wf.minStart, reqId, f.execId)),
         typeSummary,
       },
     });
