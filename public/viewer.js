@@ -441,6 +441,46 @@ function renderNodeDetail(bar, reqId, parentExecId) {
     }
   }
 
+  // Inline contents — when a nested_flow runs library nodes under the SAME
+  // execId (no new flowExecId spawned), those inner nodes show up as flat
+  // siblings in the parent waterfall. Re-group them under the parent bar so
+  // you can drill into a nested_flow that says "517ms · no nested flow" and
+  // actually see what library nodes ran in there.
+  if (bar.node === 'nested_flow') {
+    const inlineEvents = [];
+    for (const l of S.lines) {
+      if (!l || !l.flowExecId || l.flowExecId !== parentExecId) continue;
+      if (!l.flowNode || !l.flowState) continue;
+      if (l.idx === bar.lineIdx) continue;
+      if (!inWindow(l)) continue;
+      inlineEvents.push({ node: l.flowNode, state: l.flowState, lineIdx: l.idx, ts: l.timestamp });
+    }
+    if (inlineEvents.length) {
+      const pseudo = { execId: parentExecId, name: 'inline', nodes: inlineEvents };
+      const iwf = buildWaterfall(pseudo);
+      if (iwf && iwf.bars.length) {
+        h += `<div class="wf-d-section"><div class="wf-d-label">↳ Inline contents (same exec, ${iwf.bars.length} node${iwf.bars.length===1?'':'s'}) · ${fmtMs(iwf.total)}</div>`;
+        h += `<div class="wf">`;
+        for (let bi = 0; bi < iwf.bars.length; bi++) {
+          const cb = iwf.bars[bi];
+          const offsetPct = iwf.total ? ((cb.start - iwf.minStart) / iwf.total * 100) : 0;
+          const widthPct  = iwf.total ? Math.max(0.5, cb.dur / iwf.total * 100) : 100;
+          const inlineDetailId = `wfd-inline-${bar.lineIdx}-${bi}`;
+          const cHop = detectProxyHop(cb);
+          const cHopBadge = cHop ? `<span class="wf-hop" title="api_be re-POSTs to ${esc(cHop.path||'')} — authId/proxy hop">authId hop</span>` : '';
+          h += `<div class="wf-row" data-expand="${inlineDetailId}" title="${esc(cb.node)} — ${fmtMs(cb.dur)} (${cb.state})">`
+            +  `<span class="wf-caret">▸</span>`
+            +  `<span class="wf-name">${esc(cb.node)}${cHopBadge}</span>`
+            +  `<span class="wf-track"><span class="wf-bar dur-${durBucket(cb.dur)}${cb.state==='failed'?' failed':''}${cHop?' hop':''}" style="left:${offsetPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span></span>`
+            +  `<span class="wf-dur">${fmtMs(cb.dur)}</span>`
+            +  `</div>`
+            +  `<div class="wf-detail" id="${inlineDetailId}">${renderNodeDetail(cb, reqId, parentExecId)}</div>`;
+        }
+        h += `</div></div>`;
+      }
+    }
+  }
+
   if (dbPairs.length) {
     h += `<div class="wf-d-section"><div class="wf-d-label">DB / external calls (${dbPairs.length})</div>`;
     dbPairs.sort((a, b) => b.dur - a.dur);
@@ -1739,9 +1779,42 @@ function buildTraceExport(reqId){
     });
   }
 
+  // Pull in lines from child execIds that the enrichment surfaced via
+  // nestedFlows[] but our reqId/relatedLines pivot didn't catch — happens
+  // when a nested_flow spawns a NEW flowExecId mid-window. Without this,
+  // exported `lines[]` is missing the raw events that explain what the
+  // child waterfall actually did.
+  const childExecIds=new Set();
+  const walkNested=nfs=>{
+    if(!Array.isArray(nfs))return;
+    for(const nf of nfs){
+      if(nf&&nf.execId)childExecIds.add(nf.execId);
+      if(nf&&Array.isArray(nf.bars))for(const cb of nf.bars)if(cb&&cb.nestedFlows)walkNested(cb.nestedFlows);
+    }
+  };
+  for(const fo of flowsOut){
+    if(fo.waterfall&&Array.isArray(fo.waterfall.bars)){
+      for(const b of fo.waterfall.bars)if(b&&b.nestedFlows)walkNested(b.nestedFlows);
+    }
+  }
+  const seenIdx=new Set(allLines.map(l=>l.idx));
+  const extraChildLines=[];
+  if(childExecIds.size){
+    for(const l of S.lines){
+      if(!l||seenIdx.has(l.idx))continue;
+      if(l.flowExecId&&childExecIds.has(l.flowExecId)){
+        extraChildLines.push(l);
+        seenIdx.add(l.idx);
+      }
+    }
+  }
+  const finalLines=extraChildLines.length
+    ?[...allLines,...extraChildLines].sort((a,b)=>(a.timestamp||'').localeCompare(b.timestamp||''))
+    :allLines;
+
   // Trim to fields that matter for analysis — drop the per-line `json` blob
   // (often huge, mostly redundant with `raw`), keep parsed fields + raw text.
-  const linesOut=allLines.map(l=>({
+  const linesOut=finalLines.map(l=>({
     idx:l.idx, ts:l.timestamp, ns:l.ns, pod:l.pod, container:l.container,
     level:l.level, type:l.type, msg:l.msg, reqId:l.reqId,
     flowExecId:l.flowExecId, flowName:l.flowName, flowNode:l.flowNode,
@@ -1758,7 +1831,7 @@ function buildTraceExport(reqId){
     captureStart:S.start||null,
     reqId,
     flowExecIds:[...flowExecIds],
-    counts:{lines:linesOut.length, reqLines:reqLines.length, relatedLines:relatedLines.length, flows:flowsOut.length},
+    counts:{lines:linesOut.length, reqLines:reqLines.length, relatedLines:relatedLines.length, childExecLines:extraChildLines.length, flows:flowsOut.length},
     flows:flowsOut,
     lines:linesOut,
   };
