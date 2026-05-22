@@ -338,7 +338,6 @@ function checkAuth(profile, force) {
 
 function doLogin(profile, send) {
   const cluster = CFG.clusters[profile];
-  const region = CFG.region;
   const proc = spawn('aws', ['sso', 'login', '--profile', profile], { stdio: ['pipe', 'pipe', 'pipe'], env: cleanAwsEnv() });
   let out = '';
   proc.stdout.on('data', d => out += d);
@@ -351,21 +350,70 @@ function doLogin(profile, send) {
     await checkAuth(profile, true);
     broadcast({ type: 'auth-status', ...authCache });
 
-    if (!cluster) {
-      send({ type: 'auth-result', ok: true, msg: `No cluster mapping for "${profile}" — add it to ${CONFIG_FILE} or run \`aws eks update-kubeconfig\` manually.` });
-      return;
-    }
-    try {
-      execSync(`aws eks update-kubeconfig --name ${cluster} --region ${region}`, {
-        env: cleanAwsEnv({ AWS_DEFAULT_PROFILE: profile, AWS_REGION: region }), timeout: 15000
-      });
-      authCache = { ...authCache, cluster };
-      broadcast({ type: 'auth-status', ...authCache });
-      send({ type: 'auth-result', ok: true, msg: `Connected to ${cluster}` });
-    } catch (e) {
-      send({ type: 'auth-result', ok: true, msg: `kubeconfig update failed: ${e.message.slice(0, 120)}` });
-    }
+    if (cluster) { applyCluster(profile, cluster, send); return; }
+    discoverAndApplyCluster(profile, send);
   });
+}
+
+// Persist a profile→cluster mapping into ~/.kube-logger/config.json so future
+// SSO logins skip the discovery round-trip. Best-effort: a write failure just
+// means we'll re-discover next time, no user impact.
+function persistClusterMapping(profile, cluster) {
+  CFG.clusters[profile] = cluster;
+  try {
+    let j = {};
+    try { j = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch {}
+    j.region = j.region || CFG.region;
+    j.clusters = j.clusters || {};
+    j.disabledProfiles = j.disabledProfiles || [];
+    j.clusters[profile] = cluster;
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(j, null, 2) + '\n', { mode: 0o600 });
+  } catch (e) {
+    console.error(`[config] could not persist cluster mapping: ${e.message}`);
+  }
+}
+
+// Run `aws eks update-kubeconfig` for the given profile/cluster. On success
+// the mapping is persisted so we never have to discover for this profile again.
+function applyCluster(profile, cluster, send) {
+  const region = CFG.region;
+  try {
+    execSync(`aws eks update-kubeconfig --name ${cluster} --region ${region}`, {
+      env: cleanAwsEnv({ AWS_DEFAULT_PROFILE: profile, AWS_REGION: region }), timeout: 15000
+    });
+    persistClusterMapping(profile, cluster);
+    authCache = { ...authCache, cluster };
+    broadcast({ type: 'auth-status', ...authCache });
+    send({ type: 'auth-result', ok: true, msg: `Connected to ${cluster}` });
+  } catch (e) {
+    send({ type: 'auth-result', ok: true, msg: `kubeconfig update failed: ${e.message.slice(0, 120)}` });
+  }
+}
+
+// When no static mapping exists for `profile`, list EKS clusters in the
+// configured region and either auto-apply (1 cluster), prompt the viewer to
+// pick (>1), or report empty (0). Mirrors the user's shell habit of falling
+// back to `aws eks list-clusters` when no known mapping is around.
+function discoverAndApplyCluster(profile, send) {
+  const region = CFG.region;
+  send({ type: 'auth-progress', msg: `Discovering EKS clusters in ${region}…` });
+  exec(`aws eks list-clusters --region ${region} --profile ${profile} --output json`,
+    { timeout: 15000, env: cleanAwsEnv() },
+    (err, out) => {
+      if (err) {
+        send({ type: 'auth-result', ok: true, msg: `Cluster discovery failed: ${(out || err.message || '').toString().trim().slice(0, 200)}` });
+        return;
+      }
+      let clusters = [];
+      try { clusters = JSON.parse(out).clusters || []; } catch {}
+      if (clusters.length === 0) {
+        send({ type: 'auth-result', ok: true, msg: `No EKS clusters found in ${region} for "${profile}".` });
+      } else if (clusters.length === 1) {
+        applyCluster(profile, clusters[0], send);
+      } else {
+        send({ type: 'cluster-pick', profile, region, clusters });
+      }
+    });
 }
 
 function buildInitMessage() {
@@ -392,10 +440,27 @@ async function handleAction(msg, send) {
       send({ type: 'auth-progress', msg: 'Opening browser for SSO...' });
       doLogin(msg.profile, send);
       break;
-    case 'namespaces':
-      exec('kubectl get namespaces -o jsonpath="{.items[*].metadata.name}"', { timeout: 10000 }, (e, o) => {
-        send({ type: 'namespaces', list: e ? [] : o.replace(/"/g, '').split(/\s+/).filter(Boolean).sort() });
-      });
+    case 'namespaces': {
+      // Match `attachStream`: strip inherited AWS_* and re-inject the picked
+      // profile + region, so the EKS exec credential plugin (called by
+      // kubectl) doesn't get hijacked by stale shell env vars like AWS_PROFILE.
+      const extra = authCache && authCache.profile
+        ? { AWS_DEFAULT_PROFILE: authCache.profile, AWS_REGION: CFG.region }
+        : undefined;
+      exec('kubectl get namespaces -o jsonpath="{.items[*].metadata.name}"',
+        { timeout: 10000, env: cleanAwsEnv(extra) },
+        (e, o, stderr) => {
+          if (e) {
+            const errText = (stderr || o || e.message || '').toString().trim().slice(0, 300);
+            send({ type: 'namespaces', list: [], err: errText });
+          } else {
+            send({ type: 'namespaces', list: o.replace(/"/g, '').split(/\s+/).filter(Boolean).sort() });
+          }
+        });
+      break;
+    }
+    case 'pick-cluster':
+      if (msg.profile && msg.cluster) applyCluster(msg.profile, msg.cluster, send);
       break;
     case 'saas-connect':
       setSaasTarget(msg.url, msg.session);

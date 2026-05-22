@@ -1928,6 +1928,7 @@ function connect(){
         break;
       case'auth-progress':Drawer.onAuthProgress(m);break;
       case'auth-result':Drawer.onAuthResult(m);break;
+      case'cluster-pick':Drawer.onClusterPick(m);break;
       case'namespaces':Drawer.onNamespaces(m);break;
       case'saved':toast('Saved: '+(m.fn||m.path||''));break;
     }
@@ -3224,7 +3225,34 @@ const Drawer = (() => {
       const list = m.list || m.namespaces || [];
       cachedNsList = list;
       if (list.length) saveState();
+      // Empty list with an error string means kubectl failed (most often a
+      // wrong/expired current-context, or AWS exec-plugin auth failure). Show
+      // it as a toast so the user knows *why* nothing loaded rather than
+      // staring at the silent "Load namespaces first" empty state.
+      if (!list.length && m.err) toast(`kubectl: ${String(m.err).slice(0, 200)}`);
       renderNsList();
+    },
+
+    // The agent couldn't auto-pick a single cluster for this profile, so it
+    // sent us the list. Render an inline picker right under the SSO Login
+    // row — clicking a row sends `pick-cluster` back so the agent can run
+    // `aws eks update-kubeconfig` and persist the mapping.
+    onClusterPick(m) {
+      const el = $('clusterPickPanel');
+      const clusters = (m.clusters || []).map(c => String(c));
+      if (!clusters.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+      el.style.display = '';
+      el.innerHTML =
+        `<div class="sd-empty">Multiple EKS clusters for "${m.profile}" — pick one:</div>` +
+        clusters.map(c => `<div class="sd-item" data-cluster="${c}" style="cursor:pointer">${c}</div>`).join('');
+      el.onclick = e => {
+        const item = e.target.closest('.sd-item'); if (!item) return;
+        const cluster = item.dataset.cluster;
+        if (!cluster) return;
+        send({ action: 'pick-cluster', profile: m.profile, cluster });
+        el.style.display = 'none'; el.innerHTML = '';
+        $('authInfo').textContent = `Connecting to ${cluster}…`;
+      };
     },
 
     onCaptureStart(m) {
