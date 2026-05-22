@@ -1550,6 +1550,90 @@ function closeTrace(opts){
   if(!(opts&&opts.fromPresenter))presentSoon();
 }
 
+// Mirrors `renderNodeDetail` for export purposes: for a single waterfall bar,
+// returns the same data the user sees when they click to expand it — nested
+// child flow waterfalls (recursive), DB query timings, HTTP requests, silence
+// gaps, and a self-vs-child time split. Without this enrichment, "nested_flow
+// took 4.2s" tells you nothing about what the nested flow actually did.
+function buildBarContext(bar, reqId, parentExecId){
+  const startMs=bar.start, endMs=bar.start+bar.dur;
+  const inWindow=l=>{
+    if(!l||!l.timestamp)return false;
+    const t=Date.parse(l.timestamp);
+    return !Number.isNaN(t)&&t>=startMs&&t<=endMs;
+  };
+
+  // Group child flows (any flowExecId != parent's) whose lines fall in this
+  // bar's [start, end] window. Same pivot the trace panel uses.
+  const childFlows=new Map();
+  for(const l of S.lines){
+    if(!l||!l.flowExecId||l.flowExecId===parentExecId)continue;
+    if(!inWindow(l))continue;
+    if(!childFlows.has(l.flowExecId))childFlows.set(l.flowExecId,{execId:l.flowExecId,name:l.flowName,nodes:[]});
+    const cf=childFlows.get(l.flowExecId);
+    if(!cf.name&&l.flowName)cf.name=l.flowName;
+    if(l.flowNode)cf.nodes.push({node:l.flowNode,state:l.flowState,next:l.flowNext,reason:l.flowFailReason,lineIdx:l.idx,ts:l.timestamp});
+  }
+
+  const nestedFlows=[];
+  let childMs=0;
+  for(const cf of childFlows.values()){
+    const cwf=buildWaterfall(cf);
+    if(!cwf)continue;
+    childMs+=cwf.total;
+    nestedFlows.push({
+      execId:cf.execId, name:cf.name||null, totalMs:cwf.total,
+      // Recurse — child bars get the same context as parent bars do, so we
+      // can follow a chain of nested flows all the way down.
+      bars:cwf.bars.map(cb=>enrichBar(cb,cwf.minStart,reqId,cf.execId)),
+    });
+  }
+  const selfMs=Math.max(0, bar.dur - childMs);
+
+  // Lines within the bar window — used for DB pair detection and gap detection.
+  const reqLines=S.lines.filter(l=>l&&l.reqId===reqId&&inWindow(l));
+  const httpLines=S.lines.filter(l=>l&&l.type==='http'&&inWindow(l));
+
+  const dbStarts=new Map();
+  const dbCalls=[];
+  for(const l of reqLines){
+    const m=(l.msg||'').match(/^(.+?)(?:\s+(?:count|query|find|aggregate))?\s+(started|finished)$/);
+    if(!m)continue;
+    if(m[2]==='started')dbStarts.set(m[1],{ts:Date.parse(l.timestamp),lineIdx:l.idx});
+    else if(m[2]==='finished'&&dbStarts.has(m[1])){
+      const s=dbStarts.get(m[1]); dbStarts.delete(m[1]);
+      const dur=Date.parse(l.timestamp)-s.ts;
+      if(dur>=0)dbCalls.push({label:m[1],durMs:dur,startLineIdx:s.lineIdx});
+    }
+  }
+
+  const sortedTs=reqLines
+    .map(l=>({t:Date.parse(l.timestamp),lineIdx:l.idx,msg:(l.msg||l.raw||'').slice(0,200)}))
+    .filter(x=>!Number.isNaN(x.t))
+    .sort((a,b)=>a.t-b.t);
+  const gaps=[];
+  for(let i=1;i<sortedTs.length;i++){
+    const gap=sortedTs[i].t-sortedTs[i-1].t;
+    if(gap>=200)gaps.push({ms:gap,afterLineIdx:sortedTs[i-1].lineIdx,nextLineIdx:sortedTs[i].lineIdx,nextMsg:sortedTs[i].msg});
+  }
+
+  return {
+    selfMs, childMs,
+    nestedFlows,
+    dbCalls:dbCalls.sort((a,b)=>b.durMs-a.durMs),
+    httpCalls:httpLines.map(l=>({status:l.status,method:l.method,path:l.path,sizeB:l.size,lineIdx:l.idx})),
+    gaps:gaps.sort((a,b)=>b.ms-a.ms),
+  };
+}
+
+function enrichBar(bar, minStart, reqId, parentExecId){
+  return {
+    node:bar.node, title:bar.title, id:bar.id, state:bar.state,
+    startMs:bar.start-minStart, durMs:bar.dur, lineIdx:bar.lineIdx,
+    ...buildBarContext(bar, reqId, parentExecId),
+  };
+}
+
 // Build a JSON snapshot of everything the trace panel shows + all related log
 // lines, so the user can share it with an AI / coworker for slow-system
 // investigation. Mirrors openTrace's data assembly so what you see is what
@@ -1591,7 +1675,11 @@ function buildTraceExport(reqId){
       waterfall:{
         totalMs:wf.total, activeMs:active, idleMs:idle.totalMs,
         idleGaps:idle.gaps,
-        bars:wf.bars.map(b=>({node:b.node,title:b.title,id:b.id,startMs:b.start-wf.minStart,durMs:b.dur,lineIdx:b.lineIdx,state:b.state})),
+        // Each bar carries the same drill-down data the panel shows on click:
+        // nestedFlows (recursive), dbCalls, httpCalls, gaps, selfMs vs childMs.
+        // For a "nested_flow took 4.2s" bar, nestedFlows[].bars[] tells you
+        // what actually ran inside, not just the wrapper name.
+        bars:wf.bars.map(b=>enrichBar(b, wf.minStart, reqId, f.execId)),
         typeSummary,
       },
     });
