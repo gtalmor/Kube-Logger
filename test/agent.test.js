@@ -38,6 +38,7 @@ test('--help prints flag reference + exits 0', () => {
   assert.match(r.stdout, /USAGE/);
   assert.match(r.stdout, /--new-session/);
   assert.match(r.stdout, /KUBE_LOGGER_RELAY/);
+  assert.match(r.stdout, /--max-log-requests/);
 });
 
 test('--new-session wipes session + producer-key, generates fresh ones', async () => {

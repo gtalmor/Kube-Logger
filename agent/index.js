@@ -17,6 +17,20 @@ const { version: VERSION } = require('../package.json');
 // config file written). Useful for `brew list --versions` cross-checks and
 // for re-opening the viewer tab against a background-running agent.
 const _cli = process.argv.slice(2);
+// Parse --max-log-requests if present (passed down to stern).
+// Defaults to 100 to prevent stern from crashing with "maximum number of log
+// requests (50)" on larger Kubernetes namespaces.
+let maxLogRequests = '100';
+for (let i = 0; i < _cli.length; i++) {
+  if (_cli[i] === '--max-log-requests') {
+    if (i + 1 < _cli.length) {
+      maxLogRequests = _cli[i + 1];
+    }
+  } else if (_cli[i].startsWith('--max-log-requests=')) {
+    maxLogRequests = _cli[i].substring('--max-log-requests='.length);
+  }
+}
+
 if (_cli.some(a => a === '--help' || a === '-h')) {
   console.log(`kube-logger-agent ${VERSION}
 
@@ -34,6 +48,7 @@ FLAGS
       --new-session    Wipe ~/.kube-logger/session + producer-key, generate
       --rotate         fresh ones, and continue normal startup. Invalidates
                        any existing viewer URL or invite link.
+      --max-log-requests <num>  Maximum number of log requests (pods) to stream (stern only, default: 100).
 
 ENVIRONMENT
   KUBE_LOGGER_RELAY            Override the relay endpoint (default:
@@ -505,8 +520,13 @@ async function handleAction(msg, send) {
 }
 
 function spawnStream(ns, env) {
-  if (LOG_TOOL === 'stern')
-    return spawn('stern', ['-n', ns, '.*', '--since', '1s', '--no-follow=false', '--color', 'never'], { env });
+  if (LOG_TOOL === 'stern') {
+    const args = ['-n', ns, '.*', '--since', '1s', '--no-follow=false', '--color', 'never'];
+    if (maxLogRequests) {
+      args.push('--max-log-requests', maxLogRequests);
+    }
+    return spawn('stern', args, { env });
+  }
   if (LOG_TOOL === 'kubelog')
     return spawn('kubelog', ['-n', ns, '-f', 'default', '-s', '1s'], { env });
   return spawn('kubectl', ['logs', '-n', ns, '-l', 'app', '--all-containers=true', '-f', '--since=1s', '--prefix=true'], { env });
