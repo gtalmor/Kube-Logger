@@ -17,19 +17,30 @@ const { version: VERSION } = require('../package.json');
 // config file written). Useful for `brew list --versions` cross-checks and
 // for re-opening the viewer tab against a background-running agent.
 const _cli = process.argv.slice(2);
-// Parse --max-log-requests if present (passed down to stern).
-// Defaults to 100 to prevent stern from crashing with "maximum number of log
-// requests (50)" on larger Kubernetes namespaces.
+// Parse --max-log-requests if present (passed down to stern as the *starting*
+// limit). Defaults to 100. If the namespace has more pods than this, stern
+// aborts at startup ("maximum number of log requests (N)"); attachStream's
+// close handler then self-heals by re-spawning with a doubled limit, up to
+// MAX_LOG_REQUESTS_CEILING. An explicit --max-log-requests is treated as a
+// hard cap (no auto-escalation past it) so users can bound API-server load.
 let maxLogRequests = '100';
+let maxLogRequestsExplicit = false;
 for (let i = 0; i < _cli.length; i++) {
   if (_cli[i] === '--max-log-requests') {
     if (i + 1 < _cli.length) {
       maxLogRequests = _cli[i + 1];
     }
+    maxLogRequestsExplicit = true;
   } else if (_cli[i].startsWith('--max-log-requests=')) {
     maxLogRequests = _cli[i].substring('--max-log-requests='.length);
+    maxLogRequestsExplicit = true;
   }
 }
+// One stern "log request" == one concurrent stream per container, so this
+// ceiling also bounds how hard auto-escalation can hit the API server.
+const MAX_LOG_REQUESTS_CEILING = maxLogRequestsExplicit
+  ? (parseInt(maxLogRequests, 10) || 100)
+  : 5000;
 
 if (_cli.some(a => a === '--help' || a === '-h')) {
   console.log(`kube-logger-agent ${VERSION}
@@ -48,7 +59,10 @@ FLAGS
       --new-session    Wipe ~/.kube-logger/session + producer-key, generate
       --rotate         fresh ones, and continue normal startup. Invalidates
                        any existing viewer URL or invite link.
-      --max-log-requests <num>  Maximum number of log requests (pods) to stream (stern only, default: 100).
+      --max-log-requests <num>  Starting limit for concurrent pod log streams
+                       (stern only, default: 100). If a namespace has more
+                       pods, the limit auto-doubles up to 5000. Passing this
+                       flag caps escalation at <num> to bound API-server load.
 
 ENVIRONMENT
   KUBE_LOGGER_RELAY            Override the relay endpoint (default:
@@ -519,11 +533,12 @@ async function handleAction(msg, send) {
   }
 }
 
-function spawnStream(ns, env) {
+function spawnStream(ns, env, limit) {
   if (LOG_TOOL === 'stern') {
     const args = ['-n', ns, '.*', '--since', '1s', '--no-follow=false', '--color', 'never'];
-    if (maxLogRequests) {
-      args.push('--max-log-requests', maxLogRequests);
+    const lim = limit || maxLogRequests;
+    if (lim) {
+      args.push('--max-log-requests', String(lim));
     }
     return spawn('stern', args, { env });
   }
@@ -532,14 +547,15 @@ function spawnStream(ns, env) {
   return spawn('kubectl', ['logs', '-n', ns, '-l', 'app', '--all-containers=true', '-f', '--since=1s', '--prefix=true'], { env });
 }
 
-function attachStream(ns) {
+function attachStream(ns, startLimit) {
   if (!capture || capture.procs.has(ns)) return;
   const extra = authCache && authCache.profile
     ? { AWS_DEFAULT_PROFILE: authCache.profile, AWS_REGION: CFG.region }
     : undefined;
   const env = cleanAwsEnv(extra);
 
-  const proc = spawnStream(ns, env);
+  const limit = startLimit || parseInt(maxLogRequests, 10) || 100;
+  const proc = spawnStream(ns, env, limit);
   let buf = '';
   let firstData = true;
   let stderrBuf = '';
@@ -585,6 +601,26 @@ function attachStream(ns) {
       console.error(`[${ns}] ─── tail of stderr ───\n${stderrBuf.slice(-1500)}─── end stderr ───`);
     }
     if (!capture || capture.procs.get(ns) !== proc) return;
+
+    // Self-healing: stern aborts at startup if the namespace has more pods
+    // than --max-log-requests. Detect that exact failure and re-spawn this
+    // namespace with a doubled limit, up to MAX_LOG_REQUESTS_CEILING. This
+    // only fires before any logs stream (stern enumerates pods first), so no
+    // captured lines are lost or duplicated on retry.
+    const overLimit = LOG_TOOL === 'stern' && code !== 0 &&
+      /maximum number of log requests \(\d+\)/.test(stderrBuf);
+    if (overLimit && limit < MAX_LOG_REQUESTS_CEILING) {
+      const next = Math.min(limit * 2, MAX_LOG_REQUESTS_CEILING);
+      console.log(`[${ns}] stern hit max-log-requests (${limit}); retrying with ${next}`);
+      broadcast({ type: 'stderr', ns, msg: `Namespace has more pods than the stream limit (${limit}); retrying with ${next}.` });
+      capture.procs.delete(ns);
+      attachStream(ns, next);
+      return;
+    }
+    if (overLimit) {
+      console.error(`[${ns}] stern still over the limit at ceiling ${MAX_LOG_REQUESTS_CEILING}`);
+      broadcast({ type: 'stderr', ns, msg: `Namespace exceeds the maximum stream limit (${MAX_LOG_REQUESTS_CEILING}). Narrow the namespace${maxLogRequestsExplicit ? ' or raise --max-log-requests' : ''}.` });
+    }
     capture.procs.delete(ns);
     capture.nsList = capture.nsList.filter(n => n !== ns);
     broadcast({ type: 'stream-end', ns, code, stderr: stderrBuf.slice(-500) });
