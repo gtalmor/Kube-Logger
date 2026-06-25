@@ -79,7 +79,9 @@ FILES
   ~/.kube-logger/producer-key  Per-machine secret binding this agent to the
                                session at the relay.
   ~/.kube-logger/config.json   Region + AWS-profile-to-EKS-cluster map +
-                               disabled profile list. Edit by hand.
+                               disabled profiles + per-profile login commands
+                               (externalAuthCommands) for non-SSO profiles like
+                               saml2aws/Keycloak. Edit by hand.
   ~/.kube-logger/agent.pid     PID of the live agent on this machine.
 `);
   process.exit(0);
@@ -168,7 +170,17 @@ const loadOrCreateProducerKey = () => loadOrCreateSecret(PRODUCER_KEY_FILE, 'pro
 // Edited by hand at ~/.kube-logger/config.json. Shape:
 //   { "region": "us-east-1",
 //     "clusters": { "<aws-profile>": "<eks-cluster-name>", ... },
-//     "disabledProfiles": ["profile-to-hide-from-drawer"] }
+//     "disabledProfiles": ["profile-to-hide-from-drawer"],
+//     // Non-SSO profiles (saml2aws/Keycloak/assume-role): a command the agent
+//     // runs (via login shell) on Login instead of opening a browser. It must
+//     // write creds for <profile> to ~/.aws/credentials. No need for any
+//     // `eval $(saml2aws script)` / `update-kubeconfig` tail — the agent
+//     // drives kubectl by --profile and applies the cluster itself.
+//     "externalAuthCommands": { "<aws-profile>": "saml2aws login --profile <p> …" },
+//     // Friendly name for that flow, shown on the UI button ("Keycloak Login").
+//     "externalAuthLabels": { "<aws-profile>": "Keycloak" },
+//     // Fallback hint text shown for non-SSO profiles with no command.
+//     "externalAuthHints": { "<aws-profile>": "run your helper, then click Login" } }
 // Changes take effect on agent restart.
 function loadAgentConfig() {
   try {
@@ -177,16 +189,19 @@ function loadAgentConfig() {
       region: j.region || 'us-east-1',
       clusters: j.clusters || {},
       disabledProfiles: new Set(j.disabledProfiles || []),
+      externalAuthHints: j.externalAuthHints || {},
+      externalAuthCommands: j.externalAuthCommands || {},
+      externalAuthLabels: j.externalAuthLabels || {},
     };
   } catch {
-    const template = { region: 'us-east-1', clusters: {}, disabledProfiles: [] };
+    const template = { region: 'us-east-1', clusters: {}, disabledProfiles: [], externalAuthHints: {}, externalAuthCommands: {}, externalAuthLabels: {} };
     try {
       fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
       fs.writeFileSync(CONFIG_FILE, JSON.stringify(template, null, 2) + '\n', { mode: 0o600 });
     } catch (e) {
       console.error(`[config] could not write template to ${CONFIG_FILE}: ${e.message}`);
     }
-    return { region: 'us-east-1', clusters: {}, disabledProfiles: new Set() };
+    return { region: 'us-east-1', clusters: {}, disabledProfiles: new Set(), externalAuthHints: {}, externalAuthCommands: {}, externalAuthLabels: {} };
   }
 }
 const CFG = loadAgentConfig();
@@ -211,6 +226,58 @@ function discoverProfiles() {
     }
     return [...new Set(names)].filter(n => !CFG.disabledProfiles.has(n)).sort();
   } catch { return Object.keys(CFG.clusters).filter(n => !CFG.disabledProfiles.has(n)); }
+}
+
+// True if the profile has SSO keys (sso_start_url or sso_session) in ~/.aws/config.
+// Non-SSO profiles (saml2aws, IAM keys, role-chained) can't be driven by
+// `aws sso login` — the user must authenticate externally first.
+function isSsoProfile(name) {
+  if (!name) return false;
+  const cfgPath = path.join(os.homedir(), '.aws/config');
+  let text;
+  try { text = fs.readFileSync(cfgPath, 'utf8'); } catch { return false; }
+  const header = name === 'default' ? '[default]' : `[profile ${name}]`;
+  const lines = text.split('\n');
+  let inSection = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.startsWith('[')) { inSection = (line === header); continue; }
+    if (!inSection) continue;
+    if (/^sso_(start_url|session)\s*=/.test(line)) return true;
+  }
+  return false;
+}
+
+// How the agent authenticates a given profile:
+//   'sso'      → `aws sso login` (browser). Profile has sso_start_url/sso_session.
+//   'command'  → a configured command (saml2aws/assume-role helper) the agent
+//                runs for the user. No browser. From CFG.externalAuthCommands.
+//   'external' → non-SSO with no command: the agent can only verify creds the
+//                user wrote out by hand and surface a hint.
+function authMode(name) {
+  if (isSsoProfile(name)) return 'sso';
+  if (name && CFG.externalAuthCommands && CFG.externalAuthCommands[name]) return 'command';
+  return 'external';
+}
+
+// Friendly name for a profile's login flow, used to label the UI button and
+// progress text (e.g. "Keycloak Login"). Per-profile override via config, else
+// a sensible default per mode.
+function authLabel(name) {
+  const custom = CFG.externalAuthLabels && CFG.externalAuthLabels[name];
+  if (custom) return custom;
+  return authMode(name) === 'sso' ? 'SSO' : 'External';
+}
+
+// Human-readable hint for non-SSO profiles. For 'command' profiles the agent
+// runs the login itself, so the hint points back at the button. Otherwise it
+// reads CFG.externalAuthHints[profile] (override) or a generic instruction.
+function externalAuthHint(name) {
+  if (authMode(name) === 'command')
+    return `Not authenticated for "${name}". Click ${authLabel(name)} Login to run your login command.`;
+  const custom = CFG.externalAuthHints && CFG.externalAuthHints[name];
+  if (custom) return `External login required for "${name}". Run: ${custom}`;
+  return `External login required for "${name}". Run your saml2aws / credential helper in a terminal, then click Login again.`;
 }
 
 // ── State ───────────────────────────────────────────────────────────
@@ -365,22 +432,86 @@ function checkAuth(profile, force) {
   });
 }
 
+// Finish a successful login: verify real auth state, broadcast it, then apply
+// (or discover) the EKS cluster. Shared by every auth mode.
+async function finishLogin(profile, cluster, mode, send) {
+  await checkAuth(profile, true);
+  broadcast({ type: 'auth-status', ...authCache, authMode: mode });
+  if (cluster) { applyCluster(profile, cluster, send); return; }
+  discoverAndApplyCluster(profile, send);
+}
+
+// 'command' mode: run the user's configured login command (saml2aws / assume-
+// role helper) on the agent machine instead of opening a browser. Run through a
+// login shell so $PATH, $USER, macOS Keychain access, and $(...) substitution
+// all resolve the same way they do in the user's terminal. AWS_* is stripped
+// (cleanAwsEnv) — the command writes creds to ~/.aws/credentials under the
+// profile, and the agent drives everything else by --profile, so any
+// `eval $(saml2aws script)` / `update-kubeconfig` tail in the user's own
+// wrapper is unnecessary here.
+function runAuthCommand(profile, cluster, send) {
+  const cmd = CFG.externalAuthCommands[profile];
+  const label = authLabel(profile);
+  send({ type: 'auth-progress', msg: `Authenticating (${label}) on agent machine…` });
+  const shell = process.env.SHELL || '/bin/bash';
+  const proc = spawn(shell, ['-lc', cmd], { stdio: ['ignore', 'pipe', 'pipe'], env: cleanAwsEnv() });
+  let out = '';
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; try { proc.kill('SIGKILL'); } catch {} }, 90000);
+  proc.stdout.on('data', d => out += d);
+  proc.stderr.on('data', d => out += d);
+  proc.on('error', e => {
+    clearTimeout(timer);
+    broadcast({ type: 'auth-status', ok: false, profile, authMode: 'command',
+      err: `${label} login couldn't start: ${e.message}. ${externalAuthHint(profile)}` });
+  });
+  proc.on('close', async () => {
+    clearTimeout(timer);
+    // Verify regardless of exit code — the helper may exit nonzero yet still
+    // have written valid creds, or exit zero without them. Truth = sts.
+    await checkAuth(profile, true);
+    if (!authCache.ok) {
+      const tail = out.trim().slice(-200);
+      const why = timedOut ? 'timed out after 90s' : (tail ? `: ${tail}` : '');
+      broadcast({ type: 'auth-status', ok: false, profile, authMode: 'command',
+        err: `${label} login failed ${why}. ${externalAuthHint(profile)}` });
+      return;
+    }
+    finishLogin(profile, cluster, 'command', send);
+  });
+}
+
 function doLogin(profile, send) {
   const cluster = CFG.clusters[profile];
+  const mode = authMode(profile);
+
+  // 'command' mode: the agent runs the user's login helper for them.
+  if (mode === 'command') { runAuthCommand(profile, cluster, send); return; }
+
+  // 'external' mode (saml2aws/static keys with no configured command): the
+  // agent can't drive the login. Verify whatever creds the user already wrote
+  // to ~/.aws/credentials; if valid, proceed. If not, surface a hint.
+  if (mode === 'external') {
+    send({ type: 'auth-progress', msg: `Verifying ${profile} credentials…` });
+    checkAuth(profile, true).then(result => {
+      if (!result.ok) {
+        broadcast({ type: 'auth-status', ok: false, profile, authMode: mode, err: externalAuthHint(profile) });
+        return;
+      }
+      finishLogin(profile, cluster, mode, send);
+    });
+    return;
+  }
+
+  // 'sso' mode: browser-driven `aws sso login`.
+  send({ type: 'auth-progress', msg: 'Opening browser for SSO...' });
   const proc = spawn('aws', ['sso', 'login', '--profile', profile], { stdio: ['pipe', 'pipe', 'pipe'], env: cleanAwsEnv() });
   let out = '';
   proc.stdout.on('data', d => out += d);
   proc.stderr.on('data', d => out += d);
   proc.on('close', async code => {
-    if (code !== 0) { broadcast({ type: 'auth-status', ok: false, profile, err: `SSO failed: ${out.slice(0, 200)}` }); return; }
-
-    // Always verify via `sts get-caller-identity` so authCache reflects the
-    // real authed state regardless of whether we also try to touch kubeconfig.
-    await checkAuth(profile, true);
-    broadcast({ type: 'auth-status', ...authCache });
-
-    if (cluster) { applyCluster(profile, cluster, send); return; }
-    discoverAndApplyCluster(profile, send);
+    if (code !== 0) { broadcast({ type: 'auth-status', ok: false, profile, authMode: mode, err: `SSO failed: ${out.slice(0, 200)}` }); return; }
+    finishLogin(profile, cluster, mode, send);
   });
 }
 
@@ -448,10 +579,15 @@ function discoverAndApplyCluster(profile, send) {
 function buildInitMessage() {
   return {
     type: 'init',
-    auth: authCache,
+    auth: authCache ? { ...authCache, authMode: authMode(authCache.profile), authLabel: authLabel(authCache.profile) } : authCache,
     capturing: !!capture,
     tool: LOG_TOOL,
     profiles: discoverProfiles(),
+    // Per-profile auth metadata so the viewer can label the login flow (e.g.
+    // "Keycloak Login" vs "SSO Login") before any check-auth round-trip.
+    profileModes: Object.fromEntries(
+      discoverProfiles().map(p => [p, { mode: authMode(p), label: authLabel(p) }])
+    ),
     ns: capture ? capture.nsList : null,
     saas: saasTarget ? { url: saasTarget.url, session: saasTarget.session, connected: !!(saasProducer && saasProducer.readyState === 1) } : null,
   };
@@ -462,11 +598,18 @@ function buildInitMessage() {
 // used when all connected clients should see the state change.
 async function handleAction(msg, send) {
   switch (msg.action) {
-    case 'check-auth':
-      send({ type: 'auth-status', ...(await checkAuth(msg.profile)) });
+    case 'check-auth': {
+      const r = await checkAuth(msg.profile);
+      const mode = authMode(msg.profile);
+      const meta = { authMode: mode, authLabel: authLabel(msg.profile) };
+      if (!r.ok && msg.profile && mode !== 'sso') {
+        send({ type: 'auth-status', ...r, ...meta, err: externalAuthHint(msg.profile) });
+      } else {
+        send({ type: 'auth-status', ...r, ...meta });
+      }
       break;
+    }
     case 'login':
-      send({ type: 'auth-progress', msg: 'Opening browser for SSO...' });
       doLogin(msg.profile, send);
       break;
     case 'namespaces': {

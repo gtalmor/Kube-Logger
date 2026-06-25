@@ -2193,7 +2193,7 @@ function connect(){
           if(m.auth.ok||m.auth.authenticated){
             $('cLabel').textContent=m.auth.arn?m.auth.arn.split('/').pop():'Authenticated';
           }else if(agentConnected){
-            $('cLabel').textContent='SSO expired';
+            $('cLabel').textContent=expiredLabel(m.auth.authMode,m.auth.authLabel);
           }
           // Drive the main-page SSO banner from init too, so a fresh page-load
           // (or relay reconnect) reflects current auth state without waiting
@@ -2268,7 +2268,7 @@ function connect(){
         if(agentConnected){
           $('cLabel').textContent=(m.ok||m.authenticated)
             ?(m.arn?m.arn.split('/').pop():'Auth OK')
-            :'SSO expired';
+            :expiredLabel(m.authMode,m.authLabel);
         }
         updateSsoBanner(m);
         Drawer.onAuthStatus(m);
@@ -2313,7 +2313,13 @@ function setAgentConnected(on,label){
 // We cache the last-known auth state so a transient agent flicker can't
 // silently hide the banner while the user still needs to re-SSO.
 let ssoLastProfile='';
-let ssoLastAuth=null;  // { ok, err, profile, expiresAt }
+let ssoLastAuth=null;  // { ok, err, profile, expiresAt, authMode, authLabel }
+// "expired" wording that matches the profile's auth flow: "SSO expired" for SSO,
+// "Keycloak expired" (etc.) for command/external profiles.
+function expiredLabel(mode,label){
+  if(!mode||mode==='sso')return'SSO expired';
+  return`${label||'Session'} expired`;
+}
 function updateSsoBanner(m){
   if(!m)return;
   const ok=!!(m.ok||m.authenticated);
@@ -2322,6 +2328,8 @@ function updateSsoBanner(m){
     err:(m.err||m.error||'').toString(),
     profile:m.profile||(ssoLastAuth&&ssoLastAuth.profile)||'',
     expiresAt:m.expiresAt||(ssoLastAuth&&ssoLastAuth.expiresAt)||null,
+    authMode:m.authMode||(ssoLastAuth&&ssoLastAuth.authMode)||null,
+    authLabel:m.authLabel||(ssoLastAuth&&ssoLastAuth.authLabel)||null,
   };
   if(m.profile)ssoLastProfile=m.profile;
   renderSsoBanner();
@@ -2336,7 +2344,8 @@ function renderSsoBanner(){
     return;
   }
   const err=ssoLastAuth.err;
-  $('ssoInfo').textContent=err?`SSO expired — ${err.slice(0,120)}`:'SSO expired — re-authenticate to keep streaming';
+  const head=expiredLabel(ssoLastAuth.authMode,ssoLastAuth.authLabel);
+  $('ssoInfo').textContent=err?`${head} — ${err.slice(0,120)}`:`${head} — re-authenticate to keep streaming`;
   b.classList.add('v');
 }
 function hideSsoBanner(){
@@ -2617,7 +2626,10 @@ if($('ssoRelogin')){
     const p=ssoLastProfile||($('profile')&&$('profile').value);
     if(!p){toast('Open Setup and pick a profile first');return;}
     send({action:'login',profile:p});
-    $('ssoInfo').textContent='Opening SSO on agent machine…';
+    const mode=ssoLastAuth&&ssoLastAuth.authMode;
+    $('ssoInfo').textContent=(!mode||mode==='sso')
+      ?'Opening SSO on agent machine…'
+      :`Authenticating (${(ssoLastAuth&&ssoLastAuth.authLabel)||'External'}) on agent machine…`;
   });
 }
 
@@ -3278,6 +3290,19 @@ const Drawer = (() => {
   let authState = { ok:false, arn:null, err:null, expiresAt:null };
   let authTicker = null;
   let capturing = false;
+  // Per-profile auth mode/label from the agent (init.profileModes + auth-status).
+  // Drives whether the UI says "SSO Login" vs "Keycloak Login" etc.
+  let profileModes = {};
+
+  // {mode,label} for a profile, defaulting to SSO wording until the agent says
+  // otherwise. 'sso' → "SSO", 'command'/'external' → configured label.
+  function modeFor(p) { return profileModes[p] || { mode: 'sso', label: 'SSO' }; }
+
+  // Relabel the drawer's login button for the selected profile's auth mode.
+  function updateLoginBtnLabel() {
+    const btn = $('loginBtn'); if (!btn) return;
+    btn.textContent = `${modeFor($('profile').value).label} Login`;
+  }
 
   function loadState() {
     try {
@@ -3334,6 +3359,7 @@ const Drawer = (() => {
     const choose = (previous && !disabledProfiles.has(previous)) ? previous
                  : (lastProfile && !disabledProfiles.has(lastProfile) && allProfiles.includes(lastProfile)) ? lastProfile : '';
     if (choose) sel.value = choose;
+    updateLoginBtnLabel();
     renderProfilesPanel();
   }
 
@@ -3455,6 +3481,7 @@ const Drawer = (() => {
         const p = e.target.value;
         if (!p) return;
         lastProfile = p; saveState();
+        updateLoginBtnLabel();
         send({ action: 'check-auth', profile: p });
         $('authDot').className = 'dot pending';
         $('authInfo').textContent = 'Checking…';
@@ -3463,9 +3490,12 @@ const Drawer = (() => {
       $('loginBtn').addEventListener('click', () => {
         const p = $('profile').value;
         if (!p) { $('authInfo').textContent = 'Select a profile first'; return; }
+        const { mode, label } = modeFor(p);
         send({ action: 'login', profile: p });
         $('authDot').className = 'dot pending';
-        $('authInfo').textContent = 'Opening SSO on agent machine…';
+        $('authInfo').textContent = mode === 'sso'
+          ? 'Opening SSO on agent machine…'
+          : `Authenticating (${label}) on agent machine…`;
       });
 
       $('loadNs').addEventListener('click', () => {
@@ -3528,7 +3558,9 @@ const Drawer = (() => {
     },
 
     onInit(m) {
+      if (m.profileModes) profileModes = m.profileModes;
       if (Array.isArray(m.profiles)) populateProfiles(m.profiles);
+      updateLoginBtnLabel();
       if (m.auth) setAuth(m.auth.ok || m.auth.authenticated, m.auth.arn, m.auth.err, m.auth.expiresAt);
       if (m.capturing) {
         setCaptureState(true);
@@ -3550,7 +3582,15 @@ const Drawer = (() => {
       if (authState.ok && !cachedNsList.length) send({ action: 'namespaces' });
     },
 
-    onAuthStatus(m) { setAuth(m.ok || m.authenticated, m.arn, m.err || m.error, m.expiresAt); },
+    onAuthStatus(m) {
+      // Remember the agent's mode/label for this profile so the button + banner
+      // wording stay correct across reconnects and future selections.
+      if (m.profile && m.authMode) {
+        profileModes[m.profile] = { mode: m.authMode, label: m.authLabel || profileModes[m.profile]?.label || 'External' };
+        updateLoginBtnLabel();
+      }
+      setAuth(m.ok || m.authenticated, m.arn, m.err || m.error, m.expiresAt);
+    },
     onAuthProgress(m) { $('authInfo').textContent = m.msg || m.message || ''; },
     onAuthResult(m) {
       // Cluster-mapping / kubeconfig result is a separate concern from auth —
