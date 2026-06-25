@@ -372,6 +372,26 @@ function connectSaas() {
   ws.on('error', e => console.error(`[saas] error: ${e.message}`));
 }
 
+// Expiration for a non-SSO profile, read from the credentials file. saml2aws
+// writes `x_security_token_expires`; aws's own role-cred writers use
+// `aws_session_expiration` / `aws_expiration`. Any of them, ISO-8601 with tz.
+function getCredExpiration(profile) {
+  if (!profile) return null;
+  const credPath = path.join(os.homedir(), '.aws/credentials');
+  let text;
+  try { text = fs.readFileSync(credPath, 'utf8'); } catch { return null; }
+  const header = `[${profile}]`;
+  let inSection = false;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('[')) { inSection = (line === header); continue; }
+    if (!inSection) continue;
+    const m = line.match(/^(x_security_token_expires|aws_session_expiration|aws_expiration)\s*=\s*(.+)$/);
+    if (m) { const ts = new Date(m[2].trim()).getTime(); return Number.isNaN(ts) ? null : ts; }
+  }
+  return null;
+}
+
 function getSsoExpiration() {
   const cacheDir = path.join(os.homedir(), '.aws/sso/cache');
   try {
@@ -426,7 +446,12 @@ function checkAuth(profile, force) {
           authCache = { ts: now, profile, ok: out.trim().toLowerCase() === 'yes' };
         }
       }
-      authCache.expiresAt = getSsoExpiration();
+      // SSO sessions expire per the token cache; saml2aws/role profiles carry
+      // their own expiry in ~/.aws/credentials. Reading the SSO cache for a
+      // non-SSO profile would surface an unrelated (often expired) session.
+      authCache.expiresAt = (profile && !isSsoProfile(profile))
+        ? getCredExpiration(profile)
+        : getSsoExpiration();
       resolve(authCache);
     });
   });
@@ -452,6 +477,24 @@ async function finishLogin(profile, cluster, mode, send) {
 function runAuthCommand(profile, cluster, send) {
   const cmd = CFG.externalAuthCommands[profile];
   const label = authLabel(profile);
+
+  // Fast path: if the user already ran their assume helper in a terminal (or a
+  // prior login is still valid), the creds are in ~/.aws/credentials. Reuse
+  // them instead of re-running the command (avoids a redundant MFA/SAML round
+  // trip). Falls through to running the command only when creds are missing or
+  // expired.
+  send({ type: 'auth-progress', msg: `Checking ${label} session…` });
+  checkAuth(profile, true).then(r => {
+    if (r.ok) {
+      send({ type: 'auth-progress', msg: `${label} session already active — connecting…` });
+      finishLogin(profile, cluster, 'command', send);
+      return;
+    }
+    spawnAuthCommand(profile, cluster, cmd, label, send);
+  });
+}
+
+function spawnAuthCommand(profile, cluster, cmd, label, send) {
   send({ type: 'auth-progress', msg: `Authenticating (${label}) on agent machine…` });
   const shell = process.env.SHELL || '/bin/bash';
   const proc = spawn(shell, ['-lc', cmd], { stdio: ['ignore', 'pipe', 'pipe'], env: cleanAwsEnv() });
@@ -533,6 +576,26 @@ function persistClusterMapping(profile, cluster) {
   }
 }
 
+// List namespaces via kubectl and deliver them through `out` (send to a single
+// requester, or broadcast to all clients after an auto-login). Strips inherited
+// AWS_* and re-injects the picked profile + region so the EKS exec credential
+// plugin isn't hijacked by stale shell env vars like AWS_PROFILE.
+function loadNamespaces(out) {
+  const extra = authCache && authCache.profile
+    ? { AWS_DEFAULT_PROFILE: authCache.profile, AWS_REGION: CFG.region }
+    : undefined;
+  exec('kubectl get namespaces -o jsonpath="{.items[*].metadata.name}"',
+    { timeout: 10000, env: cleanAwsEnv(extra) },
+    (e, o, stderr) => {
+      if (e) {
+        const errText = (stderr || o || e.message || '').toString().trim().slice(0, 300);
+        out({ type: 'namespaces', list: [], err: errText });
+      } else {
+        out({ type: 'namespaces', list: o.replace(/"/g, '').split(/\s+/).filter(Boolean).sort() });
+      }
+    });
+}
+
 // Run `aws eks update-kubeconfig` for the given profile/cluster. On success
 // the mapping is persisted so we never have to discover for this profile again.
 function applyCluster(profile, cluster, send) {
@@ -543,8 +606,12 @@ function applyCluster(profile, cluster, send) {
     });
     persistClusterMapping(profile, cluster);
     authCache = { ...authCache, cluster };
-    broadcast({ type: 'auth-status', ...authCache });
+    broadcast({ type: 'auth-status', ...authCache, authMode: authMode(profile), authLabel: authLabel(profile) });
     send({ type: 'auth-result', ok: true, msg: `Connected to ${cluster}` });
+    // kubeconfig now points at the cluster — auto-load namespaces so the user
+    // doesn't have to click "Load namespaces" after every login. Broadcast so
+    // all viewers on the session see them.
+    loadNamespaces(broadcast);
   } catch (e) {
     send({ type: 'auth-result', ok: true, msg: `kubeconfig update failed: ${e.message.slice(0, 120)}` });
   }
@@ -612,25 +679,9 @@ async function handleAction(msg, send) {
     case 'login':
       doLogin(msg.profile, send);
       break;
-    case 'namespaces': {
-      // Match `attachStream`: strip inherited AWS_* and re-inject the picked
-      // profile + region, so the EKS exec credential plugin (called by
-      // kubectl) doesn't get hijacked by stale shell env vars like AWS_PROFILE.
-      const extra = authCache && authCache.profile
-        ? { AWS_DEFAULT_PROFILE: authCache.profile, AWS_REGION: CFG.region }
-        : undefined;
-      exec('kubectl get namespaces -o jsonpath="{.items[*].metadata.name}"',
-        { timeout: 10000, env: cleanAwsEnv(extra) },
-        (e, o, stderr) => {
-          if (e) {
-            const errText = (stderr || o || e.message || '').toString().trim().slice(0, 300);
-            send({ type: 'namespaces', list: [], err: errText });
-          } else {
-            send({ type: 'namespaces', list: o.replace(/"/g, '').split(/\s+/).filter(Boolean).sort() });
-          }
-        });
+    case 'namespaces':
+      loadNamespaces(send);
       break;
-    }
     case 'pick-cluster':
       if (msg.profile && msg.cluster) applyCluster(msg.profile, msg.cluster, send);
       break;
