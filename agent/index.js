@@ -333,6 +333,7 @@ function connectSaas() {
       ws.send(JSON.stringify({
         type: 'capture-state',
         ns: capture.nsList, start: capture.start, n: capture.lines.length,
+        filters: Object.fromEntries(capture.filters),
       }));
       for (let i = 0; i < capture.lines.length; i++) {
         const { line, ns } = capture.lines[i];
@@ -656,6 +657,7 @@ function buildInitMessage() {
       discoverProfiles().map(p => [p, { mode: authMode(p), label: authLabel(p) }])
     ),
     ns: capture ? capture.nsList : null,
+    filters: capture ? Object.fromEntries(capture.filters) : null,
     saas: saasTarget ? { url: saasTarget.url, session: saasTarget.session, connected: !!(saasProducer && saasProducer.readyState === 1) } : null,
   };
 }
@@ -697,13 +699,19 @@ async function handleAction(msg, send) {
       send(buildInitMessage());
       break;
     case 'start':
-      startCapture(msg.ns);
+      startCapture(msg.ns, msg.filters);
       break;
     case 'add-ns':
-      addNamespaces(msg.ns);
+      addNamespaces(msg.ns, msg.filters);
       break;
     case 'remove-ns':
       removeNamespaces(msg.ns);
+      break;
+    case 'pods':
+      listWorkloads(msg.ns, send);
+      break;
+    case 'set-filter':
+      setFilter(msg.ns, msg.workloads);
       break;
     case 'stop': {
       const r = stopCapture();
@@ -727,15 +735,64 @@ async function handleAction(msg, send) {
   }
 }
 
-function spawnStream(ns, env, limit) {
+// Map a pod to its "workload" (the controller name, replica hash stripped) so
+// selecting a workload survives restarts/scaling. Deployment pods are owned by a
+// ReplicaSet named "<deploy>-<template-hash>"; strip the trailing hash segment.
+// StatefulSet/DaemonSet/Job pods are owned directly by the named controller.
+// Bare pods (no controller) group under their own name.
+function workloadOf(name, kind, owner) {
+  if (kind === 'ReplicaSet' && owner) return owner.replace(/-[a-z0-9]+$/i, '');
+  if (owner) return owner;
+  return name;
+}
+
+// stern pod-query regex for a set of workloads. Empty → all pods. Anchored at
+// the start with a "(-|$)" boundary so "redis" matches redis-0 / redis-... but
+// not (most) unrelated pods. Regex metachars in names are escaped.
+function podQuery(workloads) {
+  if (!workloads || !workloads.length) return '.*';
+  const alt = workloads.map(w => String(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  return `^(${alt})(-|$)`;
+}
+
+// List a namespace's pods grouped by workload, for the viewer's pod picker.
+function listWorkloads(ns, send) {
+  if (!ns) { send({ type: 'pods', ns, workloads: [], err: 'no namespace' }); return; }
+  const extra = authCache && authCache.profile
+    ? { AWS_DEFAULT_PROFILE: authCache.profile, AWS_REGION: CFG.region }
+    : undefined;
+  const jp = '{range .items[*]}{.metadata.name}{"\\t"}{.metadata.ownerReferences[0].kind}{"\\t"}{.metadata.ownerReferences[0].name}{"\\n"}{end}';
+  exec(`kubectl get pods -n ${ns} -o jsonpath='${jp}'`,
+    { timeout: 12000, env: cleanAwsEnv(extra) },
+    (e, o, stderr) => {
+      if (e) {
+        send({ type: 'pods', ns, workloads: [], err: (stderr || o || e.message || '').toString().trim().slice(0, 300) });
+        return;
+      }
+      const groups = new Map();
+      for (const raw of o.split('\n')) {
+        if (!raw.trim()) continue;
+        const [name, kind, owner] = raw.split('\t');
+        const wl = workloadOf(name, kind, owner);
+        groups.set(wl, (groups.get(wl) || 0) + 1);
+      }
+      const workloads = [...groups.entries()]
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      send({ type: 'pods', ns, workloads });
+    });
+}
+
+function spawnStream(ns, env, limit, workloads) {
   if (LOG_TOOL === 'stern') {
-    const args = ['-n', ns, '.*', '--since', '1s', '--no-follow=false', '--color', 'never'];
+    const args = ['-n', ns, podQuery(workloads), '--since', '1s', '--no-follow=false', '--color', 'never'];
     const lim = limit || maxLogRequests;
     if (lim) {
       args.push('--max-log-requests', String(lim));
     }
     return spawn('stern', args, { env });
   }
+  // kubelog/kubectl fallbacks don't support per-pod queries — capture the ns.
   if (LOG_TOOL === 'kubelog')
     return spawn('kubelog', ['-n', ns, '-f', 'default', '-s', '1s'], { env });
   return spawn('kubectl', ['logs', '-n', ns, '-l', 'app', '--all-containers=true', '-f', '--since=1s', '--prefix=true'], { env });
@@ -749,7 +806,8 @@ function attachStream(ns, startLimit) {
   const env = cleanAwsEnv(extra);
 
   const limit = startLimit || parseInt(maxLogRequests, 10) || 100;
-  const proc = spawnStream(ns, env, limit);
+  const workloads = capture.filters ? capture.filters.get(ns) : null;
+  const proc = spawnStream(ns, env, limit, workloads);
   let buf = '';
   let firstData = true;
   let stderrBuf = '';
@@ -837,21 +895,33 @@ function attachStream(ns, startLimit) {
   if (!capture.nsList.includes(ns)) capture.nsList.push(ns);
 }
 
-function startCapture(nsInput) {
+// filters: optional { ns: [workload,...] }. A namespace absent from filters (or
+// with an empty list) captures all pods.
+function mergeFilters(filters) {
+  if (!capture || !filters) return;
+  for (const [ns, wls] of Object.entries(filters)) {
+    if (Array.isArray(wls) && wls.length) capture.filters.set(ns, wls);
+    else capture.filters.delete(ns);
+  }
+}
+
+function startCapture(nsInput, filters) {
   if (capture) stopCapture();
 
   const nsList = (Array.isArray(nsInput) ? nsInput : [nsInput]).filter(Boolean);
   if (!nsList.length) return;
 
-  capture = { procs: new Map(), nsList: [], start: Date.now(), lines: [] };
+  capture = { procs: new Map(), nsList: [], start: Date.now(), lines: [], filters: new Map() };
+  mergeFilters(filters);
 
   for (const ns of nsList) attachStream(ns);
 
-  broadcast({ type: 'capture-start', ns: [...capture.nsList], start: capture.start, tool: LOG_TOOL });
+  broadcast({ type: 'capture-start', ns: [...capture.nsList], start: capture.start, tool: LOG_TOOL, filters: Object.fromEntries(capture.filters) });
 }
 
-function addNamespaces(nsInput) {
+function addNamespaces(nsInput, filters) {
   if (!capture) return;
+  mergeFilters(filters);
   const nsList = (Array.isArray(nsInput) ? nsInput : [nsInput]).filter(Boolean);
   const added = [];
   for (const ns of nsList) {
@@ -860,6 +930,24 @@ function addNamespaces(nsInput) {
     if (capture && capture.procs.has(ns)) added.push(ns);
   }
   if (added.length) broadcast({ type: 'ns-added', ns: added });
+}
+
+// Live-change which workloads a namespace captures: update the filter and
+// re-spawn just that namespace's stream. Deleting the old proc from the map
+// before killing it means its close handler (guarded by procs.get(ns)===proc)
+// no-ops, so the swap doesn't end the capture or drop other namespaces.
+function setFilter(ns, workloads) {
+  if (!capture || !ns) return;
+  if (Array.isArray(workloads) && workloads.length) capture.filters.set(ns, workloads);
+  else capture.filters.delete(ns);
+  const old = capture.procs.get(ns);
+  if (!old) return; // ns not currently streaming — applies on next attach
+  capture.procs.delete(ns);
+  attachStream(ns);
+  try { old.kill('SIGTERM'); } catch {}
+  const pinned = old;
+  setTimeout(() => { try { pinned.kill('SIGKILL'); } catch {} }, 2000);
+  broadcast({ type: 'ns-refiltered', ns, workloads: workloads || [] });
 }
 
 function removeNamespaces(nsInput) {

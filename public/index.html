@@ -617,6 +617,20 @@
   .sd-selected { font-size:10px; color:var(--muted); margin-top:6px; min-height:14px; }
   .sd-chip { display:inline-flex; align-items:center; gap:4px; background:var(--bg3); border:1px solid var(--border); border-radius:3px; padding:1px 5px; margin-right:4px; margin-top:2px; }
   .sd-chip-dot { width:8px; height:8px; border-radius:2px; display:inline-block; }
+  .sd-chip-wf { color:var(--accent); font-size:9px; }
+  /* Pod (workload) picker under an expanded namespace row */
+  .ns-pods { flex-shrink:0; background:var(--bg); border:1px solid var(--border); color:var(--muted); font-family:inherit; font-size:10px; padding:1px 6px; border-radius:3px; cursor:pointer; white-space:nowrap; }
+  .ns-pods:hover { background:var(--bg2); border-color:var(--accent); color:var(--text); }
+  .ns-pods.filtered { color:var(--accent); border-color:var(--accent); }
+  .wf-panel { background:var(--bg); border-bottom:1px solid var(--border); padding:4px 8px 6px 24px; }
+  .wf-head { font-size:10px; color:var(--muted); padding:2px 0 4px; }
+  .wf-clear { color:var(--accent); cursor:pointer; }
+  .wf-clear:hover { text-decoration:underline; }
+  .wf-empty { font-size:10px; color:var(--muted); padding:4px 0; }
+  .wf-row { display:flex; align-items:center; gap:6px; padding:2px 0; font-size:11px; cursor:pointer; }
+  .wf-row input[type=checkbox] { margin:0; flex-shrink:0; cursor:pointer; }
+  .wf-row .wf-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .wf-row .wf-count { color:var(--muted); font-size:9px; background:var(--bg3); border-radius:8px; padding:0 6px; flex-shrink:0; }
 </style>
 </head>
 <body>

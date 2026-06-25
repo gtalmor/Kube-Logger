@@ -2277,6 +2277,7 @@ function connect(){
       case'auth-result':Drawer.onAuthResult(m);break;
       case'cluster-pick':Drawer.onClusterPick(m);break;
       case'namespaces':Drawer.onNamespaces(m);break;
+      case'pods':Drawer.onPods(m);break;
       case'saved':toast('Saved: '+(m.fn||m.path||''));break;
     }
   };
@@ -3286,6 +3287,13 @@ const Drawer = (() => {
   let disabledProfiles = new Set();
   let cachedNsList = [];
   let selectedNs = new Set();
+  // Pod-level filtering: per-namespace set of selected workloads. A namespace
+  // with no selected workloads captures all pods. cachedWf holds the workload
+  // list fetched from the agent; expandedNs tracks which rows are open.
+  let selectedWf = {};            // { ns: [workload,...] }  (persisted)
+  let cachedWf = {};              // { ns: [{name,count}] }
+  let expandedNs = new Set();
+  let loadingWf = new Set();
   let lastProfile = '';
   let authState = { ok:false, arn:null, err:null, expiresAt:null };
   let authTicker = null;
@@ -3310,6 +3318,7 @@ const Drawer = (() => {
       disabledProfiles = new Set(j.disabledProfiles || []);
       cachedNsList = Array.isArray(j.cachedNs) ? j.cachedNs : [];
       selectedNs = new Set(j.selectedNs || []);
+      selectedWf = (j.selectedWf && typeof j.selectedWf === 'object') ? j.selectedWf : {};
       if (j.nsColors) for (const [ns,c] of Object.entries(j.nsColors)) S.nsColors[ns] = c;
       lastProfile = j.lastProfile || '';
     } catch {}
@@ -3320,10 +3329,20 @@ const Drawer = (() => {
         disabledProfiles: [...disabledProfiles],
         cachedNs: cachedNsList,
         selectedNs: [...selectedNs],
+        selectedWf,
         nsColors: S.nsColors,
         lastProfile,
       }));
     } catch {}
+  }
+  // Selected workloads for a namespace (always an array; empty = all pods).
+  function wfFor(ns) { return Array.isArray(selectedWf[ns]) ? selectedWf[ns] : []; }
+  // Build the { ns: [workloads] } filter map for currently selected namespaces,
+  // omitting namespaces with no workload selection (those capture all pods).
+  function buildFilters() {
+    const f = {};
+    for (const ns of selectedNs) { const w = wfFor(ns); if (w.length) f[ns] = w; }
+    return f;
   }
 
   function open() {
@@ -3401,14 +3420,39 @@ const Drawer = (() => {
     for (const ns of filtered) {
       const checked = selectedNs.has(ns);
       const color = checked ? ensureColor(ns) : (S.nsColors[ns] || '#30363d');
+      const wfSel = wfFor(ns);
+      const open = expandedNs.has(ns);
+      const podLabel = wfSel.length ? `${wfSel.length} workload${wfSel.length===1?'':'s'}` : 'all pods';
       h += `<div class="sd-item" data-ns="${esc(ns)}">`
         +  `<input type="checkbox" ${checked?'checked':''} />`
         +  `<span class="sd-name" title="${esc(ns)}">${esc(ns)}</span>`
+        +  (checked ? `<button class="ns-pods${wfSel.length?' filtered':''}" data-expand="${esc(ns)}" title="Choose which pods to capture">${open?'▾':'▸'} ${podLabel}</button>` : '')
         +  (checked ? `<input type="color" value="${color}" title="Color for ${esc(ns)}" />` : '')
         +  `</div>`;
+      if (checked && open) h += renderWfPanel(ns);
     }
     el.innerHTML = h;
     renderSelectedSummary();
+  }
+
+  // The workload picker shown under an expanded, selected namespace. Empty
+  // selection = all pods (the default). Ticking workloads narrows the capture.
+  function renderWfPanel(ns) {
+    const wrap = inner => `<div class="wf-panel" data-wf-ns="${esc(ns)}">${inner}</div>`;
+    if (loadingWf.has(ns) || !cachedWf[ns]) return wrap(`<div class="wf-empty">Loading pods…</div>`);
+    const list = cachedWf[ns];
+    if (!list.length) return wrap(`<div class="wf-empty">No pods in this namespace</div>`);
+    const sel = new Set(wfFor(ns));
+    let h = `<div class="wf-head">${sel.size ? `${sel.size} selected` : 'All pods'}${sel.size ? ` · <span class="wf-clear" data-wf-clear="${esc(ns)}">clear (all pods)</span>` : ''}</div>`;
+    for (const w of list) {
+      const on = sel.has(w.name);
+      h += `<label class="wf-row">`
+        +  `<input type="checkbox" data-wf="${esc(w.name)}" ${on?'checked':''} />`
+        +  `<span class="wf-name" title="${esc(w.name)}">${esc(w.name)}</span>`
+        +  `<span class="wf-count">${w.count}</span>`
+        +  `</label>`;
+    }
+    return wrap(h);
   }
 
   function renderSelectedSummary() {
@@ -3417,7 +3461,9 @@ const Drawer = (() => {
     let h = '';
     for (const ns of selectedNs) {
       const c = S.nsColors[ns] || '#30363d';
-      h += `<span class="sd-chip"><span class="sd-chip-dot" style="background:${c}"></span>${esc(ns)}</span>`;
+      const w = wfFor(ns);
+      const tag = w.length ? ` <span class="sd-chip-wf">${w.length} wl</span>` : '';
+      h += `<span class="sd-chip"><span class="sd-chip-dot" style="background:${c}"></span>${esc(ns)}${tag}</span>`;
     }
     el.innerHTML = h;
   }
@@ -3506,14 +3552,29 @@ const Drawer = (() => {
       $('nsFilter').addEventListener('input', () => renderNsList());
 
       $('nsList').addEventListener('change', e => {
+        // Workload checkbox inside the pod picker (a sibling of .sd-item).
+        if (e.target.dataset && e.target.dataset.wf !== undefined) {
+          const panel = e.target.closest('[data-wf-ns]'); if (!panel) return;
+          const ns = panel.dataset.wfNs;
+          const wl = e.target.dataset.wf;
+          const set = new Set(wfFor(ns));
+          if (e.target.checked) set.add(wl); else set.delete(wl);
+          selectedWf[ns] = [...set];
+          if (!selectedWf[ns].length) delete selectedWf[ns];
+          saveState();
+          // Live-apply to the running stream for this namespace.
+          if (capturing && selectedNs.has(ns)) send({ action: 'set-filter', ns, workloads: wfFor(ns) });
+          renderNsList(); updateStartBtn();
+          return;
+        }
         const item = e.target.closest('.sd-item'); if (!item) return;
         const ns = item.dataset.ns;
         if (e.target.type === 'checkbox') {
           if (e.target.checked) { selectedNs.add(ns); ensureColor(ns); }
-          else selectedNs.delete(ns);
+          else { selectedNs.delete(ns); expandedNs.delete(ns); }
           saveState();
           // Live add/remove while capturing so the user can iterate without a restart.
-          if (capturing) send({ action: e.target.checked ? 'add-ns' : 'remove-ns', ns: [ns] });
+          if (capturing) send({ action: e.target.checked ? 'add-ns' : 'remove-ns', ns: [ns], filters: buildFilters() });
           renderNsList(); updateStartBtn();
         } else if (e.target.type === 'color') {
           S.nsColors[ns] = e.target.value; saveState();
@@ -3523,7 +3584,25 @@ const Drawer = (() => {
       });
 
       $('nsList').addEventListener('click', e => {
-        if (e.target.tagName === 'INPUT') return;
+        // Expand/collapse the pod picker for a namespace.
+        const exp = e.target.closest('[data-expand]');
+        if (exp) {
+          const ns = exp.dataset.expand;
+          if (expandedNs.has(ns)) expandedNs.delete(ns);
+          else { expandedNs.add(ns); if (!cachedWf[ns]) { loadingWf.add(ns); send({ action: 'pods', ns }); } }
+          renderNsList();
+          return;
+        }
+        // "clear (all pods)" link inside the picker.
+        const clr = e.target.closest('[data-wf-clear]');
+        if (clr) {
+          const ns = clr.dataset.wfClear;
+          delete selectedWf[ns]; saveState();
+          if (capturing && selectedNs.has(ns)) send({ action: 'set-filter', ns, workloads: [] });
+          renderNsList(); updateStartBtn();
+          return;
+        }
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'LABEL' || e.target.closest('.wf-row')) return;
         const item = e.target.closest('.sd-item'); if (!item) return;
         const cb = item.querySelector('input[type=checkbox]');
         if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change', { bubbles: true })); }
@@ -3532,7 +3611,7 @@ const Drawer = (() => {
       $('startBtn').addEventListener('click', () => {
         const ns = [...selectedNs];
         if (!ns.length) return;
-        send({ action: 'start', ns });
+        send({ action: 'start', ns, filters: buildFilters() });
         close();
       });
       $('stopBtn').addEventListener('click', () => send({ action: 'stop' }));
@@ -3567,6 +3646,7 @@ const Drawer = (() => {
         if (Array.isArray(m.ns)) {
           selectedNs = new Set(m.ns);
           for (const n of selectedNs) ensureColor(n);
+          if (m.filters && typeof m.filters === 'object') selectedWf = { ...m.filters };
           saveState();
           renderNsList();
         }
@@ -3618,6 +3698,20 @@ const Drawer = (() => {
       // it as a toast so the user knows *why* nothing loaded rather than
       // staring at the silent "Load namespaces first" empty state.
       if (!list.length && m.err) toast(`kubectl: ${String(m.err).slice(0, 200)}`);
+      renderNsList();
+    },
+
+    onPods(m) {
+      loadingWf.delete(m.ns);
+      cachedWf[m.ns] = Array.isArray(m.workloads) ? m.workloads : [];
+      if (m.err) toast(`pods (${m.ns}): ${String(m.err).slice(0, 160)}`);
+      // Drop any selected workloads that no longer exist so the filter stays valid.
+      if (selectedWf[m.ns]) {
+        const live = new Set(cachedWf[m.ns].map(w => w.name));
+        const kept = selectedWf[m.ns].filter(w => live.has(w));
+        if (kept.length) selectedWf[m.ns] = kept; else delete selectedWf[m.ns];
+        saveState();
+      }
       renderNsList();
     },
 
