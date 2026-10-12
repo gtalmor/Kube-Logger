@@ -1,237 +1,151 @@
 #!/usr/bin/env node
-// Kube Logger SaaS Relay
+// Kube Logger Relay
 //
-// Architecture:
-//   local agent ── wss ──► /producer?session=ABC&key=KKK
-//        ▲                      │
-//        │                      │ broadcast
+//   local agent ── wss ──► /producer?session=S&key=K
+//        ▲                      │ fan out (+ bounded history)
 //        │                      ▼
-//   producer-originated    /consumer?session=ABC   (owner's browser — read/write)
-//   control replies        /consumer?rotoken=TTT   (invitee's browser — read-only)
+//   viewer actions        /consumer?session=S   (owner's browser)
 //
-// - Only one producer per session. The first producer binds its `key`; later
-//   producer connects must present the same key or they're rejected.
-// - Invites: producer asks the relay to mint a high-entropy code tied to its
-//   session. Anyone who opens `GET /i/<code>` gets a short-lived read-only
-//   token and is redirected into the viewer. Invitee consumers cannot send
-//   control messages back to the producer.
+// - One producer per session. The first producer binds its key; later
+//   producers must present the same key. Bindings persist across restarts
+//   (data/state.json, hashed) so an idle session can't be claimed by a
+//   stranger who only knows the session id.
+// - The relay stores recent `log-batch` frames per session so a viewer that
+//   opens later sees history. It tells a reconnecting producer what it has
+//   (producer-hello) so the agent only replays the gap.
+// - The relay never interprets viewer actions; it forwards them verbatim.
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
-const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
+
+const { BatchHistory } = require('./lib/history');
+const { KeyBindings } = require('./lib/bindings');
+const { fanout, replayHistory, sendOrKick } = require('./lib/fanout');
 
 const PORT = parseInt(process.env.PORT || '4040', 10);
 const HOST = process.env.HOST || '127.0.0.1';
-const PUBLIC_DIR = path.join(__dirname, '..', 'public');
-const MIN_SESSION_LEN = 16;
+const ROOT = path.join(__dirname, '..');
 
-// Per-session log ring buffer so late-joining consumers see the history
-// captured before they connected, not just go-forward. Bounded by both
-// line count and byte size to cap memory per session.
+// Static roots. PUBLIC_DIR is served at "/". NEXT_DIR (the new viewer while
+// it's being built) at "/next/" and LEGACY_DIR (the old viewer after the
+// cutover) at "/legacy/" are served only when they exist.
+const PUBLIC_DIR = path.resolve(process.env.PUBLIC_DIR || path.join(ROOT, 'public'));
+const MOUNTS = [
+  ['/next/',   path.resolve(process.env.NEXT_DIR   || path.join(ROOT, 'web', 'dist'))],
+  ['/legacy/', path.resolve(process.env.LEGACY_DIR || path.join(ROOT, 'public'))],
+].filter(([prefix, dir]) => dir !== PUBLIC_DIR && fs.existsSync(path.join(dir, 'index.html')));
+
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data'));
+const STATE_FILE = path.join(DATA_DIR, 'state.json');
+
 const HISTORY_MAX_LINES = parseInt(process.env.HISTORY_MAX_LINES || '20000', 10);
 const HISTORY_MAX_BYTES = parseInt(process.env.HISTORY_MAX_BYTES || String(10 * 1024 * 1024), 10);
+const CONSUMER_MAX_BUFFERED = parseInt(process.env.CONSUMER_MAX_BUFFERED_BYTES || String(16 * 1024 * 1024), 10);
+const SEND_OPTS = { maxBuffered: CONSUMER_MAX_BUFFERED };
 
-const DEFAULT_INVITE_TTL_MS   = 60 * 60 * 1000;  // 1h
-const MAX_INVITE_TTL_MS       = 24 * 60 * 60 * 1000; // 24h
-const RO_TOKEN_TTL_MS         = 12 * 60 * 60 * 1000; // 12h once redeemed
-const LOOKUP_FAIL_WINDOW_MS   = 5 * 60 * 1000;
-const LOOKUP_FAIL_LIMIT       = 10;
-const LOOKUP_FAIL_BLOCK_MS    = 60 * 60 * 1000;  // 1h lockout
+const SESSION_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const KEY_RE     = /^[A-Za-z0-9_-]{16,128}$/;
 
-// ── Sessions ────────────────────────────────────────────────────
-// session id -> { producer, producerKey, consumers: Set<WebSocket>, startedAt }
+function log(session, msg) {
+  const short = (session || '').slice(0, 8);
+  console.log(`[${new Date().toISOString()}] [${short}…] ${msg}`);
+}
+
+// ── Sessions ────────────────────────────────────────────────────────
+// id -> { producer, consumers: Set<ws>, history: BatchHistory, startedAt }
 const sessions = new Map();
 
 function getOrCreateSession(id) {
   let s = sessions.get(id);
   if (!s) {
-    s = {
-      producer: null,
-      producerKey: null,
-      consumers: new Set(),
-      presenter: null,
-      lastPresenterState: null,
-      history: [],          // ring buffer of raw 'log' frames
-      historyBytes: 0,
-      startedAt: Date.now(),
-    };
+    s = { producer: null, consumers: new Set(), history: new BatchHistory({ maxLines: HISTORY_MAX_LINES, maxBytes: HISTORY_MAX_BYTES }), startedAt: Date.now() };
     sessions.set(id, s);
   }
   return s;
 }
 
-// Append a producer frame to the session history and evict oldest entries
-// until both line-count and byte-size caps are satisfied.
-function pushHistory(s, raw) {
-  s.history.push(raw);
-  s.historyBytes += raw.length;
-  while (
-    (s.history.length > HISTORY_MAX_LINES || s.historyBytes > HISTORY_MAX_BYTES)
-    && s.history.length > 0
-  ) {
-    const dropped = s.history.shift();
-    s.historyBytes -= dropped.length;
-  }
-}
-
 function dropIfEmpty(id) {
   const s = sessions.get(id);
-  if (!s) return;
-  if (!s.producer && s.consumers.size === 0) sessions.delete(id);
+  if (s && !s.producer && s.consumers.size === 0) sessions.delete(id);
 }
 
-// ── Invites + ro-tokens ─────────────────────────────────────────
-// code   -> { session, expiresAt, oneUse, used }
-// token  -> { session, expiresAt }
-// Persisted to disk so deploys / pm2 reloads don't invalidate live invites.
-// File lives at ./data/state.json; deploy.yml excludes ./data so rsync --delete
-// doesn't wipe it on each push.
-const DATA_DIR  = path.join(__dirname, '..', 'data');
-const STATE_FILE = path.join(DATA_DIR, 'state.json');
-const invites  = new Map();
-const roTokens = new Map();
+const bindings = new KeyBindings({ file: STATE_FILE, log: m => console.log(`[state] ${m}`) });
+bindings.load();
+setInterval(() => bindings.sweep(), 60 * 60 * 1000).unref();
 
-function loadState() {
-  try {
-    const j = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    const now = Date.now();
-    let loaded = 0, skipped = 0;
-    for (const [k, v] of (j.invites || []))  { if (v.expiresAt > now && !v.used) { invites.set(k, v); loaded++; } else skipped++; }
-    for (const [k, v] of (j.roTokens || [])) { if (v.expiresAt > now)            { roTokens.set(k, v); loaded++; } else skipped++; }
-    console.log(`[state] loaded ${loaded} live entries, pruned ${skipped} expired`);
-  } catch (e) {
-    if (e.code !== 'ENOENT') console.error(`[state] could not load ${STATE_FILE}: ${e.message}`);
-  }
-}
-
-let saveTimer = null;
-function scheduleSave() {
-  if (saveTimer) return;
-  // Coalesce bursts (multiple invites in a tick) into one write.
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    try {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-      const data = { version: 1, invites: [...invites], roTokens: [...roTokens] };
-      const tmp = STATE_FILE + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(data));
-      fs.renameSync(tmp, STATE_FILE);
-    } catch (e) {
-      console.error(`[state] save failed: ${e.message}`);
-    }
-  }, 200);
-}
-loadState();
-
-function newInviteCode() { return crypto.randomBytes(16).toString('base64url'); }  // ~128 bits
-function newRoToken()   { return crypto.randomBytes(24).toString('base64url'); }  // ~192 bits
-
-// Per-IP rate limit on invite-code lookups. Not strictly needed against 128-bit
-// codes, but keeps logs tidy and blocks obvious scanners.
-const lookupFailures = new Map(); // ip -> { count, firstFailAt, blockedUntil }
-
-function isBlocked(ip) {
-  const r = lookupFailures.get(ip);
-  if (!r) return false;
-  if (r.blockedUntil && Date.now() < r.blockedUntil) return true;
-  return false;
-}
-
-function recordLookupFailure(ip) {
-  const now = Date.now();
-  let r = lookupFailures.get(ip);
-  if (!r || (now - r.firstFailAt) > LOOKUP_FAIL_WINDOW_MS) {
-    r = { count: 0, firstFailAt: now, blockedUntil: 0 };
-    lookupFailures.set(ip, r);
-  }
-  r.count++;
-  if (r.count >= LOOKUP_FAIL_LIMIT) r.blockedUntil = now + LOOKUP_FAIL_BLOCK_MS;
-}
-
-// Periodic sweep of expired invites and ro-tokens.
-setInterval(() => {
-  const now = Date.now();
-  let mutated = false;
-  for (const [k, v] of invites)   if (v.expiresAt  < now || v.used) { invites.delete(k); mutated = true; }
-  for (const [k, v] of roTokens)  if (v.expiresAt  < now)           { roTokens.delete(k); mutated = true; }
-  for (const [ip, r] of lookupFailures) if (r.blockedUntil && now > r.blockedUntil) lookupFailures.delete(ip);
-  if (mutated) scheduleSave();
-}, 5 * 60 * 1000).unref();
-
-// ── Static file serving ─────────────────────────────────────────
+// ── Static files ────────────────────────────────────────────────────
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js':   'application/javascript; charset=utf-8',
+  '.mjs':  'application/javascript; charset=utf-8',
   '.css':  'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.map':  'application/json; charset=utf-8',
   '.svg':  'image/svg+xml',
   '.png':  'image/png',
   '.ico':  'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.txt':  'text/plain; charset=utf-8',
+};
+
+const SECURITY_HEADERS = {
+  'Referrer-Policy': 'no-referrer',            // the session id lives in the URL
+  'X-Content-Type-Options': 'nosniff',
 };
 
 function serveStatic(req, res) {
-  const parsed = url.parse(req.url);
-  let rel = decodeURIComponent(parsed.pathname || '/');
+  let rel;
+  try { rel = decodeURIComponent(url.parse(req.url).pathname || '/'); }
+  catch { res.writeHead(400); return res.end('bad path'); }
+  let root = PUBLIC_DIR;
+  for (const [prefix, dir] of MOUNTS) {
+    if (rel === prefix.slice(0, -1)) { res.writeHead(302, { Location: prefix }); return res.end(); }
+    if (rel.startsWith(prefix)) { root = dir; rel = rel.slice(prefix.length - 1); break; }
+  }
   if (rel === '/' || rel === '') rel = '/index.html';
-  const full = path.normalize(path.join(PUBLIC_DIR, rel));
-  if (!full.startsWith(PUBLIC_DIR)) { res.writeHead(400); return res.end('bad path'); }
+  const full = path.normalize(path.join(root, rel));
+  if (full !== root && !full.startsWith(root + path.sep)) { res.writeHead(400); return res.end('bad path'); }
   fs.stat(full, (err, st) => {
-    if (err || !st.isFile()) { res.writeHead(404); return res.end('not found'); }
+    if (err || !st.isFile()) { res.writeHead(404, SECURITY_HEADERS); return res.end('not found'); }
     const ext = path.extname(full).toLowerCase();
-    res.writeHead(200, {
-      'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=300',
-    });
+    const cache = ext === '.html' ? 'no-store'
+      : /[\\/]assets[\\/]/.test(full) ? 'public, max-age=31536000, immutable'
+      : 'public, max-age=300';
+    res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': cache });
     fs.createReadStream(full).pipe(res);
   });
 }
 
-function clientIp(req) {
-  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
-      || req.socket.remoteAddress || 'unknown';
-}
-
-function handleInviteRedeem(req, res) {
-  const m = /^\/i\/([A-Za-z0-9_-]{8,64})\/?$/.exec(url.parse(req.url).pathname || '');
-  if (!m) { res.writeHead(404); return res.end('not found'); }
-  const ip = clientIp(req);
-  if (isBlocked(ip)) { res.writeHead(429, { 'Content-Type': 'text/plain' }); return res.end('too many attempts'); }
-
-  const code = m[1];
-  const inv = invites.get(code);
-  if (!inv || inv.expiresAt < Date.now() || inv.used) {
-    recordLookupFailure(ip);
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    return res.end('invalid or expired invite');
-  }
-  if (inv.oneUse) inv.used = true;
-
-  const token = newRoToken();
-  roTokens.set(token, { session: inv.session, expiresAt: Date.now() + RO_TOKEN_TTL_MS });
-  scheduleSave();
-  log(inv.session, `invite redeemed (ip ${ip}, oneUse=${!!inv.oneUse})`);
-
-  res.writeHead(302, { Location: `/?rotoken=${encodeURIComponent(token)}` });
-  return res.end();
-}
-
-// ── HTTP server ─────────────────────────────────────────────────
+// ── HTTP ────────────────────────────────────────────────────────────
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/health') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
-  if (req.url === '/stats')  { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ sessions: sessions.size, invites: invites.size, roTokens: roTokens.size, uptime: process.uptime() })); }
-  if ((req.url || '').startsWith('/i/')) return handleInviteRedeem(req, res);
+  // Lets an agent find out why a producer upgrade was refused (bun's ws has
+  // no `unexpected-response` event). Read-only: never binds.
+  if ((req.url || '').startsWith('/producer/check?')) {
+    const q = url.parse(req.url, true).query;
+    const session = String(q.session || '').trim(), key = String(q.key || '').trim();
+    const hdr = { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', ...SECURITY_HEADERS };
+    if (!SESSION_RE.test(session) || !KEY_RE.test(key)) { res.writeHead(400, hdr); return res.end('bad request'); }
+    const v = bindings.peek(session, key);
+    if (v === 'mismatch') { res.writeHead(401, hdr); return res.end('mismatch'); }
+    res.writeHead(200, hdr); return res.end(v);
+  }
+  if (req.url === '/stats') {
+    let consumers = 0;
+    for (const s of sessions.values()) consumers += s.consumers.size;
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({ sessions: sessions.size, consumers, bindings: bindings.size, uptime: process.uptime() }));
+  }
   serveStatic(req, res);
 });
 
-// ── WebSocket keepalive ────────────────────────────────────────
-// Browsers / agents sometimes drop the connection without sending a Close
-// frame (laptop sleep, network cut, browser-tab killed). Without a ping
-// the server never notices and the consumer lingers in s.consumers forever
-// — making the presence pill report ghost viewers. Every 30s we ping each
-// open socket; if the previous ping wasn't pong'd back, terminate.
+// ── WebSocket keepalive ─────────────────────────────────────────────
+// Peers sometimes vanish without a Close frame (laptop sleep, network cut).
+// Ping every 30s; terminate anything that didn't pong the previous ping.
 const PING_INTERVAL_MS = 30000;
 function attachKeepalive(ws) {
   ws.isAlive = true;
@@ -239,8 +153,7 @@ function attachKeepalive(ws) {
 }
 setInterval(() => {
   for (const s of sessions.values()) {
-    const all = [s.producer, ...s.consumers].filter(Boolean);
-    for (const ws of all) {
+    for (const ws of [s.producer, ...s.consumers].filter(Boolean)) {
       if (ws.isAlive === false) { try { ws.terminate(); } catch {} continue; }
       ws.isAlive = false;
       try { ws.ping(); } catch {}
@@ -248,12 +161,13 @@ setInterval(() => {
   }
 }, PING_INTERVAL_MS).unref();
 
-// ── WebSocket upgrade ──────────────────────────────────────────
-// /producer?session=X&key=Y — first connect binds the key; later producers
-//   presenting a different key are rejected.
-// /consumer?session=X       — owner's browser, read/write.
-// /consumer?rotoken=T       — invitee, read-only; session derived from token.
+// ── WebSocket upgrade ───────────────────────────────────────────────
 const wss = new WebSocketServer({ noServer: true });
+
+function reject(socket, status, text) {
+  socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
+}
 
 httpServer.on('upgrade', (req, socket, head) => {
   const parsed = url.parse(req.url, true);
@@ -261,339 +175,129 @@ httpServer.on('upgrade', (req, socket, head) => {
   if (pathname !== '/producer' && pathname !== '/consumer') return socket.destroy();
 
   const session = String(parsed.query.session || '').trim();
-  const key     = String(parsed.query.key     || '').trim();
-  const rotoken = String(parsed.query.rotoken || '').trim();
-
-  let effectiveSession = session;
-  let readOnly = false;
-
-  if (pathname === '/consumer' && rotoken) {
-    const t = roTokens.get(rotoken);
-    if (!t || t.expiresAt < Date.now()) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
-    effectiveSession = t.session;
-    readOnly = true;
-  } else if (!session || session.length < MIN_SESSION_LEN) {
-    socket.write('HTTP/1.1 400 Bad Request\r\n\r\n'); return socket.destroy();
-  }
+  if (!SESSION_RE.test(session)) return reject(socket, 400, 'Bad Request');
 
   if (pathname === '/producer') {
-    // Enforce producer key if already bound.
-    const s = sessions.get(session);
-    if (s && s.producerKey && s.producerKey !== key) {
-      log(session, `rejected producer connect: key mismatch`);
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy();
-    }
+    const key = String(parsed.query.key || '').trim();
+    if (!KEY_RE.test(key)) return reject(socket, 400, 'Bad Request');
+    const verdict = bindings.verify(session, key);
+    if (verdict === 'mismatch') { log(session, 'rejected producer connect: key mismatch'); return reject(socket, 401, 'Unauthorized'); }
+    if (verdict === 'bound') log(session, 'producer key bound');
   }
 
   wss.handleUpgrade(req, socket, head, ws => {
     ws.role = pathname.slice(1);
-    ws.session = effectiveSession;
-    ws.readOnly = readOnly;
-    ws.producerKey = key || null;
+    ws.session = session;
     wss.emit('connection', ws, req);
   });
 });
 
 wss.on('connection', ws => {
   const s = getOrCreateSession(ws.session);
+  if (ws.role === 'producer') return onProducer(ws, s);
+  return onConsumer(ws, s);
+});
 
-  if (ws.role === 'producer') {
-    if (!s.producerKey && ws.producerKey) s.producerKey = ws.producerKey;  // bind on first connect
-    if (s.producer && s.producer !== ws) {
-      try { s.producer.close(4000, 'replaced by newer producer'); } catch {}
-    }
-    s.producer = ws;
-    attachKeepalive(ws);
-    log(ws.session, `producer connected (consumers: ${s.consumers.size})`);
-    fanoutToConsumers(s, JSON.stringify({ type: 'producer-ready' }));
-
-    ws.on('message', buf => {
-      const raw = buf.toString();
-      // Opportunistically buffer log frames so later-joining consumers can
-      // replay captured history. Ignore non-log messages (acks, status) —
-      // they're ephemeral and shouldn't be replayed.
-      try {
-        const m = JSON.parse(raw);
-        if (m && m.type === 'log') pushHistory(s, raw);
-      } catch {}
-      fanoutToConsumers(s, raw);
-    });
-
-    ws.on('close', () => {
-      if (s.producer === ws) s.producer = null;
-      log(ws.session, `producer disconnected`);
-      fanoutToConsumers(s, JSON.stringify({ type: 'producer-gone' }));
-      dropIfEmpty(ws.session);
-    });
-    ws.on('error', e => log(ws.session, `producer error: ${e.message}`));
-    return;
+// ── Producer ────────────────────────────────────────────────────────
+function onProducer(ws, s) {
+  if (s.producer && s.producer !== ws) {
+    try { s.producer.close(4000, 'replaced by newer producer'); } catch {}
   }
+  s.producer = ws;
+  attachKeepalive(ws);
+  log(ws.session, `producer connected (consumers: ${s.consumers.size}, history: ${s.history.lines} lines)`);
 
-  // consumer
-  ws.idle = false;
-  ws.following = false;      // explicitly opted-in to follow
-  ws.forceFollowing = false; // forced to follow because an owner is presenting
-  ws.presenting = false;
+  ws.send(JSON.stringify({
+    type: 'producer-hello', session: ws.session,
+    captureId: s.history.captureId, lastIndex: s.history.lastIndex, lines: s.history.lines,
+  }));
+  fanout(s.consumers, JSON.stringify({ type: 'producer-ready' }), SEND_OPTS);
+
+  ws.on('message', buf => {
+    let raw = buf.toString();
+    let m = null;
+    try { m = JSON.parse(raw); } catch { return; }
+    if (!m || typeof m.type !== 'string') return;
+    switch (m.type) {
+      case 'log': {
+        // Pre-batching agents: normalize into a 1-item batch so history and
+        // viewers only ever deal with one shape.
+        const items = [{ i: m.i, ns: m.ns, line: m.line }];
+        raw = JSON.stringify({ type: 'log-batch', items });
+        s.history.pushBatch(raw, items);
+        break;
+      }
+      case 'log-batch':
+        s.history.pushBatch(raw, m.items);
+        break;
+      case 'capture-start':
+        s.history.reset(m.captureId);
+        break;
+      case 'cleared':
+        s.history.clear();
+        break;
+      case 'capture-state':
+        // Agent → relay only: resync after a reconnect. If the agent moved on
+        // to a different capture while we weren't talking, drop the old one.
+        if (m.captureId !== s.history.captureId) s.history.reset(m.captureId);
+        return;
+      default:
+        break;
+    }
+    fanout(s.consumers, raw, SEND_OPTS);
+  });
+
+  ws.on('close', () => {
+    if (s.producer === ws) s.producer = null;
+    bindings.touch(ws.session);
+    log(ws.session, 'producer disconnected');
+    fanout(s.consumers, JSON.stringify({ type: 'producer-gone' }), SEND_OPTS);
+    dropIfEmpty(ws.session);
+  });
+  ws.on('error', e => log(ws.session, `producer error: ${e.message}`));
+}
+
+// ── Consumer ────────────────────────────────────────────────────────
+function onConsumer(ws, s) {
   attachKeepalive(ws);
   s.consumers.add(ws);
-  log(ws.session, `consumer connected (producer: ${s.producer ? 'yes' : 'no'}, readOnly: ${ws.readOnly}, total: ${s.consumers.size})`);
+  log(ws.session, `consumer connected (producer: ${s.producer ? 'yes' : 'no'}, total: ${s.consumers.size})`);
 
-  safeSend(ws, JSON.stringify({
-    type: 'relay-hello',
-    session: ws.session,
-    producerConnected: !!s.producer,
-    readOnly: ws.readOnly,
-  }));
-  // Replay buffered log history so the late joiner sees what was captured
-  // before they connected. Sent as individual frames so the viewer's live
-  // log path handles them without special-casing. Wrapped in a bracketing
-  // pair of markers so the viewer can show a spinner / "loading history"
-  // hint if it wants to.
-  if (s.history.length) {
-    safeSend(ws, JSON.stringify({ type: 'history-begin', count: s.history.length }));
-    for (const raw of s.history) safeSend(ws, raw);
-    safeSend(ws, JSON.stringify({ type: 'history-end' }));
-  }
-  broadcastPresence(s);
-  // A new INVITEE joining while an owner is already presenting should be
-  // force-followed so they immediately track the ongoing presentation. Other
-  // owner tabs (readOnly=false) are opt-in like any normal follower — we
-  // don't want the relay flagging them forceFollowing while the viewer
-  // shows them an opt-in Follow button (that would desync the two sides).
-  if (s.presenter && !s.presenter.readOnly && ws !== s.presenter && ws.readOnly) {
-    ws.forceFollowing = true;
-  }
-  safeSend(ws, JSON.stringify({
-    type: 'presenter-status',
-    presenting: !!s.presenter,
-    presenterIsOwner: !!s.presenter && !s.presenter.readOnly,
-    forced: !!(s.presenter && !s.presenter.readOnly),
-    followers: [...s.consumers].filter(c => c.following || c.forceFollowing).length,
-  }));
-  // Replay the last snapshot so a late joiner immediately matches the current
-  // view instead of staring at their pre-join state until the presenter
-  // happens to act again.
-  if (s.presenter && s.lastPresenterState && (ws.forceFollowing || ws.following)) {
-    safeSend(ws, JSON.stringify({ type: 'presenter-state', state: s.lastPresenterState }));
-  }
-  // Tell the presenter their follower count just bumped.
-  if (s.presenter && s.presenter !== ws) broadcastPresenterStatus(s);
+  sendOrKick(ws, JSON.stringify({ type: 'relay-hello', protocol: 2, session: ws.session, producerConnected: !!s.producer }), SEND_OPTS);
+  replayHistory(ws, s.history, SEND_OPTS).catch(e => log(ws.session, `replay error: ${e.message}`));
 
   ws.on('message', buf => {
     const raw = buf.toString();
     let m = null;
-    try { m = JSON.parse(raw); } catch {}
-    // Bookkeeping actions are allowed from any consumer, including invitees.
-    if (m && m.action === 'presence') { ws.idle = !!m.idle; broadcastPresence(s); return; }
-    if (m && m.action === 'follow')   {
-      // Invitees who are being force-followed can still send follow:false,
-      // but the relay ignores it — they can't opt out of an owner's drive.
-      const prev = ws.following;
-      if (!ws.forceFollowing) ws.following = !!m.following;
-      // Just-opted-in follower deserves a replay of the current view — they
-      // shouldn't have to wait for the presenter's next action to see anything.
-      if (!prev && ws.following && s.presenter && s.lastPresenterState) {
-        safeSend(ws, JSON.stringify({ type: 'presenter-state', state: s.lastPresenterState }));
-      }
-      broadcastPresenterStatus(s); return;
-    }
-    // Presenter actions — BOTH owners and invitees may present. Only owner
-    // presentations are "forced" on invitees; an invitee's presentation is
-    // opt-in for everyone else (including other invitees AND the owner).
-    if (m && m.action === 'presenter-start') { handlePresenterStart(ws, s); return; }
-    if (m && m.action === 'presenter-stop')  { handlePresenterStop(ws, s);  return; }
-    if (m && m.action === 'presenter-state' && ws.presenting) {
-      fanoutPresenterState(s, ws, m.state);
-      return;
-    }
-    // Everything else from invitees is dropped.
-    if (ws.readOnly) return;
-    if (m && m.action === 'create-invite') { handleCreateInvite(ws, m); return; }
-    if (m && m.action === 'revoke-invite') { handleRevokeInvite(ws, m); return; }
-    if (m && m.action === 'kick-invitees') { handleKickInvitees(ws); return; }
-    if (s.producer && s.producer.readyState === 1) s.producer.send(raw);
+    try { m = JSON.parse(raw); } catch { return; }
+    if (!m || typeof m.action !== 'string') return;
+    if (s.producer && s.producer.readyState === 1) { try { s.producer.send(raw); } catch {} }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code) => {
     s.consumers.delete(ws);
-    log(ws.session, `consumer disconnected (remaining: ${s.consumers.size})`);
-    const wasFollowing = ws.following || ws.forceFollowing;
-    if (s.presenter === ws) clearPresenter(s);
-    // Any follower leaving — including the presenter themselves — can change
-    // the count the presenter sees. Always re-broadcast when someone with a
-    // bearing on presenter status drops.
-    if (s.presenter || wasFollowing) broadcastPresenterStatus(s);
-    broadcastPresence(s);
+    log(ws.session, `consumer disconnected (code ${code}, remaining: ${s.consumers.size})`);
     dropIfEmpty(ws.session);
   });
   ws.on('error', e => log(ws.session, `consumer error: ${e.message}`));
-});
-
-// Start a presentation. Anyone (owner or invitee) can start, but:
-//  - Owner presenter → every non-owner consumer is marked forceFollowing,
-//    so invitees can't opt out of the owner's drive.
-//  - Invitee presenter → no one is forced; others opt in via `follow:true`.
-// Taking over from a prior presenter revokes them with a `presenter-revoked`
-// ack so their local UI can flip back.
-function handlePresenterStart(ws, s) {
-  // Invitees cannot take over an owner's force-presentation — that would
-  // defeat the whole "force-follow" premise (invitee could just click Present
-  // and immediately become the driver). Owners can take over invitees freely.
-  if (s.presenter && s.presenter !== ws && !s.presenter.readOnly && ws.readOnly) {
-    safeSend(ws, JSON.stringify({ type: 'presenter-denied', reason: 'owner-presenting' }));
-    return;
-  }
-  if (s.presenter && s.presenter !== ws) {
-    const prev = s.presenter;
-    prev.presenting = false;
-    safeSend(prev, JSON.stringify({ type: 'presenter-revoked' }));
-  }
-  s.presenter = ws;
-  ws.presenting = true;
-  s.lastPresenterState = null;  // new presenter, new view — drop stale cache
-  const forced = !ws.readOnly;
-  for (const c of s.consumers) {
-    // Force only INVITEES (readOnly consumers). Other owner tabs remain opt-in
-    // — the viewer's "forced" UX keys off RO_TOKEN, so flagging a tokenless
-    // owner tab as forceFollowing would desync the relay from the UI.
-    c.forceFollowing = forced && c !== ws && c.readOnly;
-  }
-  broadcastPresenterStatus(s);
 }
 
-function handlePresenterStop(ws, s) {
-  if (s.presenter === ws) clearPresenter(s);
-  else ws.presenting = false;
-  broadcastPresenterStatus(s);
-}
-
-function clearPresenter(s) {
-  if (s.presenter) { s.presenter.presenting = false; }
-  s.presenter = null;
-  s.lastPresenterState = null;
-  for (const c of s.consumers) c.forceFollowing = false;
-}
-
-function broadcastPresenterStatus(s) {
-  let followers = 0;
-  for (const c of s.consumers) if (c.following || c.forceFollowing) followers++;
-  const payload = JSON.stringify({
-    type: 'presenter-status',
-    presenting: !!s.presenter,
-    presenterIsOwner: !!s.presenter && !s.presenter.readOnly,
-    forced: !!(s.presenter && !s.presenter.readOnly),
-    followers,
-  });
-  for (const c of s.consumers) if (c.readyState === 1) { try { c.send(payload); } catch {} }
-}
-
-function fanoutPresenterState(s, sender, state) {
-  s.lastPresenterState = state;
-  const payload = JSON.stringify({ type: 'presenter-state', state });
-  for (const c of s.consumers) {
-    if (c === sender) continue;
-    if (!(c.following || c.forceFollowing)) continue;
-    if (c.readyState !== 1) continue;
-    try { c.send(payload); } catch {}
-  }
-}
-
-function broadcastPresence(s) {
-  let owners = 0, invitees = 0, idle = 0;
-  for (const c of s.consumers) {
-    if (c.readOnly) invitees++; else owners++;
-    if (c.idle) idle++;
-  }
-  const totalAll = owners + invitees;
-  // Each viewer sees a count of *other* viewers — not themselves. Otherwise
-  // a solo session always shows "1 viewing · 0 idle" which is just confusing.
-  for (const c of s.consumers) {
-    if (c.readyState !== 1) continue;
-    const selfOwner = !c.readOnly;
-    const selfIdle  = !!c.idle;
-    const counts = {
-      total:    totalAll - 1,
-      owners:   owners   - (selfOwner ? 1 : 0),
-      invitees: invitees - (selfOwner ? 0 : 1),
-      idle:     idle     - (selfIdle  ? 1 : 0),
-    };
-    counts.active = counts.total - counts.idle;
-    try { c.send(JSON.stringify({ type: 'presence', counts })); } catch {}
-  }
-}
-
-// ── Invite handlers (invoked from an owner's consumer socket) ───────
-// `ws.session` is the owner's session; fan the reply out to all consumers
-// on that session so whichever browser tab asked will see the result.
-function handleCreateInvite(ws, msg) {
-  const ttlMs = Math.min(Math.max(parseInt(msg.ttl, 10) || DEFAULT_INVITE_TTL_MS / 1000, 60), MAX_INVITE_TTL_MS / 1000) * 1000;
-  const oneUse = !!msg.oneUse;
-  const code = newInviteCode();
-  const expiresAt = Date.now() + ttlMs;
-  invites.set(code, { session: ws.session, expiresAt, oneUse, used: false });
-  scheduleSave();
-  log(ws.session, `invite minted (oneUse=${oneUse}, ttl=${Math.round(ttlMs/1000)}s)`);
-  const s = sessions.get(ws.session);
-  if (s) fanoutToConsumers(s, JSON.stringify({
-    type: 'invite-created',
-    code,
-    path: `/i/${code}`,   // relative; the viewer prepends its own origin
-    expiresAt,
-    oneUse,
-  }));
-}
-
-// Owner-initiated panic button: invalidate every outstanding invite + ro-token
-// for this session and forcibly close any read-only consumer currently viewing.
-// Owners stay connected (only invitees / read-only sockets get the boot).
-function handleKickInvitees(ws) {
-  let revokedInvites = 0, revokedTokens = 0, kicked = 0;
-  for (const [code, inv] of invites)   if (inv.session === ws.session)  { invites.delete(code); revokedInvites++; }
-  for (const [tok, t]   of roTokens)   if (t.session   === ws.session)  { roTokens.delete(tok); revokedTokens++; }
-  scheduleSave();
-  const s = sessions.get(ws.session);
-  if (s) {
-    for (const c of [...s.consumers]) {
-      if (c.readOnly) { try { c.close(4001, 'kicked by owner'); } catch {} kicked++; }
-    }
-    safeSend(ws, JSON.stringify({ type: 'kicked', revokedInvites, revokedTokens, kicked }));
-  }
-  log(ws.session, `kick-invitees: revoked ${revokedInvites} invites, ${revokedTokens} tokens; kicked ${kicked} sockets`);
-}
-
-function handleRevokeInvite(ws, msg) {
-  const code = String(msg.code || '');
-  const inv = invites.get(code);
-  if (inv && inv.session === ws.session) {
-    invites.delete(code);
-    scheduleSave();
-    log(ws.session, `invite revoked`);
-    const s = sessions.get(ws.session);
-    if (s) fanoutToConsumers(s, JSON.stringify({ type: 'invite-revoked', code }));
-  }
-}
-
-function fanoutToConsumers(session, raw) {
-  for (const c of session.consumers) if (c.readyState === 1) c.send(raw);
-}
-
-function safeSend(ws, raw) { try { if (ws.readyState === 1) ws.send(raw); } catch {} }
-
-function log(session, msg) {
-  const short = (session || '').slice(0, 8);
-  console.log(`[${new Date().toISOString()}] [${short}…] ${msg}`);
-}
-
-// ── Startup ─────────────────────────────────────────────────────
+// ── Startup ─────────────────────────────────────────────────────────
 httpServer.listen(PORT, HOST, () => {
-  console.log(`\n  Kube Logger Relay  [build:invite-v1]`);
+  console.log(`\n  Kube Logger Relay  [protocol 2]`);
   console.log(`  Listening on http://${HOST}:${PORT}`);
-  console.log(`  Viewer:        GET  /`);
-  console.log(`  Invite redeem: GET  /i/<code>   → 302 to /?rotoken=...`);
+  console.log(`  Viewer:        GET  /            ← ${PUBLIC_DIR}`);
+  for (const [prefix, dir] of MOUNTS) console.log(`                 GET  ${prefix.padEnd(12)} ← ${dir}`);
   console.log(`  Producer WS:   /producer?session=<id>&key=<key>`);
-  console.log(`  Consumer WS:   /consumer?session=<id> | ?rotoken=<token>`);
+  console.log(`  Consumer WS:   /consumer?session=<id>`);
+  console.log(`  State:         ${STATE_FILE} (${bindings.size} bindings)`);
   console.log(`  Stats:         GET  /stats\n`);
 });
 
-process.on('SIGTERM', () => { httpServer.close(() => process.exit(0)); });
-process.on('SIGINT',  () => { httpServer.close(() => process.exit(0)); });
+function shutdown() {
+  bindings.saveNow();
+  httpServer.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref();
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

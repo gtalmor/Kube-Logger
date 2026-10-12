@@ -10,11 +10,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Viewer tests
+        if: hashFiles('web/package.json') != ''
+        run: npm --prefix web ci && npm --prefix web test
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # The new viewer (web/) is built here on the runner; only web/dist is
+      # shipped to the server.
+      - name: Build viewer
+        if: hashFiles('web/package.json') != ''
+        run: npm --prefix web ci && npm --prefix web run build
 
       - name: Setup SSH
         env:
@@ -27,7 +53,7 @@ jobs:
           ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       # Push the runner's checkout to the server instead of pulling from GitHub
-      # on the server — the server no longer needs a GitHub deploy key.
+      # on the server — the server never needs a GitHub credential.
       - name: Rsync to server
         env:
           SSH_USER: ${{ secrets.SSH_USER }}
@@ -36,6 +62,7 @@ jobs:
         run: |
           rsync -az --delete \
             --exclude=.git --exclude=node_modules --exclude=logs --exclude=.env --exclude=data \
+            --exclude=web/node_modules --exclude=web/src --exclude=web/fixtures --exclude=test \
             ./ "$SSH_USER@$SSH_HOST:$APP_DIR/"
 
       - name: Install deps and reload pm2

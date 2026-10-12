@@ -76,6 +76,38 @@ test('plain run reuses the persisted session id', async () => {
   } finally { cleanup(); }
 });
 
+test('agent exits with a clear message when another key owns the session (401)', { timeout: 15000 }, async () => {
+  const { startRelay } = require('./helpers/relay');
+  const WebSocket = require('ws');
+  const relay = await startRelay({ quiet: true });
+  const { dir: HOME, cleanup } = freshHome();
+  try {
+    const session = 'a'.repeat(32);
+    // Bind the session with key A from a "different machine".
+    const owner = await new Promise((resolve, reject) => {
+      const ws = new WebSocket(`${relay.baseWs}/producer?session=${session}&key=${'b'.repeat(32)}`);
+      ws.on('open', () => resolve(ws)); ws.on('error', reject);
+    });
+    owner.close();
+    // This machine has the same session id but a different producer key.
+    fs.mkdirSync(path.join(HOME, '.kube-logger'), { recursive: true });
+    fs.writeFileSync(path.join(HOME, '.kube-logger', 'session'), session + '\n');
+    fs.writeFileSync(path.join(HOME, '.kube-logger', 'producer-key'), 'c'.repeat(32) + '\n');
+    const r = await new Promise(resolve => {
+      const child = spawn(process.execPath, [AGENT], {
+        env: { ...process.env, HOME, KUBE_LOGGER_NO_BROWSER: '1', KUBE_LOGGER_NO_UPDATE_CHECK: '1', KUBE_LOGGER_RELAY: relay.baseHttp },
+      });
+      let out = '';
+      child.stdout.on('data', d => out += d); child.stderr.on('data', d => out += d);
+      const t = setTimeout(() => { child.kill('SIGKILL'); resolve({ code: 'timeout', out }); }, 8000);
+      child.on('exit', code => { clearTimeout(t); resolve({ code, out }); });
+    });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /another agent owns session/i);
+    assert.match(r.out, /--new-session/);
+  } finally { cleanup(); await relay.stop(); relay.cleanup(); }
+});
+
 // Spawn the agent, wait until it prints the boot banner (which contains the
 // viewer URL), then SIGTERM it. We can't wait for clean exit because the agent
 // loops trying to connect to the relay; we just need its first second of output.

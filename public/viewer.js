@@ -2244,6 +2244,15 @@ function connect(){
         try{addLive(m.line,m.ns);}catch(e){console.error('addLive error:',e);}
         if(!S._replaying)Drawer.onLog(m);
         break;
+      case'log-batch':
+        // Protocol v2 (batched agent). Transitional shim until the new viewer
+        // ships: feed each item through the single-line path above.
+        if(!$('lc').classList.contains('v')){$('lc').classList.add('v');$('welcome').classList.add('h');$('filterBar').style.display='flex';}
+        for(const it of (m.items||[])){
+          try{addLive(it.line,it.ns);}catch(e){console.error('addLive error:',e);}
+        }
+        if(!S._replaying&&m.items&&m.items.length)Drawer.onLog(m.items[m.items.length-1]);
+        break;
       case'cleared':clearState();Drawer.onCleared();break;
       case'ns-added':{
         const arr=Array.isArray(m.ns)?m.ns:[m.ns];

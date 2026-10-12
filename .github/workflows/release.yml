@@ -6,14 +6,26 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to build (e.g. v0.1.0)
+        description: Tag to build (e.g. v0.3.0)
         required: true
 
 permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,7 +34,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
-      # Stamp the tag (e.g. v0.1.3 → "0.1.3") into package.json so the binary
+      # Stamp the tag (e.g. v0.3.0 → "0.3.0") into package.json so the binary
       # reports the right version via --version. No commit — workspace-only.
       - name: Sync package.json version to tag
         run: |
@@ -44,9 +56,61 @@ jobs:
           TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
           gh release create "$TAG" \
             --title "Kube Logger Agent $TAG" \
-            --notes "Download the binary for your platform, \`chmod +x\`, and run. Verify against SHA256SUMS." \
+            --generate-notes \
+            --notes "Download the binary for your platform, \`chmod +x\`, and run. Verify against SHA256SUMS. Homebrew: \`brew update && brew upgrade kube-logger-agent\`." \
             dist/kube-logger-agent-darwin-arm64 \
             dist/kube-logger-agent-darwin-x64 \
             dist/kube-logger-agent-linux-x64 \
             dist/kube-logger-agent-linux-arm64 \
             dist/SHA256SUMS
+
+  # Bump the Homebrew tap so `brew upgrade` picks the release up without a
+  # manual formula edit. Needs a TAP_TOKEN secret: a fine-grained PAT with
+  # "Contents: write" on gtalmor/homebrew-kube-logger. Skipped when the
+  # secret is absent.
+  tap:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' }}
+    steps:
+      - name: Check for tap token
+        id: tok
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: echo "present=$([ -n "$TAP_TOKEN" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tap
+        if: steps.tok.outputs.present == 'yes'
+        uses: actions/checkout@v4
+        with:
+          repository: gtalmor/homebrew-kube-logger
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+
+      - name: Rewrite formula
+        if: steps.tok.outputs.present == 'yes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          gh release download "$TAG" --repo "${GITHUB_REPOSITORY}" --pattern SHA256SUMS --dir sums
+          sha() { grep " kube-logger-agent-$1\$" sums/SHA256SUMS | cut -d' ' -f1; }
+          F=tap/Formula/kube-logger-agent.rb
+          sed -i -E "s|version \"[^\"]+\"|version \"${VERSION}\"|" "$F"
+          sed -i -E "s|/download/v[^/]+/|/download/${TAG}/|g" "$F"
+          python3 - "$F" "$(sha darwin-arm64)" "$(sha darwin-x64)" "$(sha linux-arm64)" "$(sha linux-x64)" <<'PY'
+          import re, sys
+          path, *shas = sys.argv[1:]
+          src = open(path).read()
+          order = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]
+          for plat, s in zip(order, shas):
+              src = re.sub(r'(kube-logger-agent-%s"\s*\n\s*sha256 ")[0-9a-f]+(")' % plat, r'\g<1>%s\g<2>' % s, src)
+          open(path, "w").write(src)
+          PY
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/kube-logger-agent.rb
+          git commit -m "kube-logger-agent ${VERSION}" || echo "formula unchanged"
+          git push
