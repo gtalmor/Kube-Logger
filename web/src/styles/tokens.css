@@ -1,0 +1,66 @@
+/* Design tokens. Light is the :root default; dark applies when the system
+   prefers it (unless data-theme="light") or when data-theme="dark". */
+:root {
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+
+  --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-lg: 15px; --fs-xl: 18px;
+  --fs-log: 12.5px; --lh-row: 22px;
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-6: 24px;
+  --r-sm: 4px; --r-md: 6px; --r-lg: 8px;
+  --z-popover: 60; --z-panel: 100; --z-drawer: 110; --z-toast: 999;
+  --header-h: 48px; --status-h: 28px;
+
+  --bg-0: #ffffff; --bg-1: #f6f8fa; --bg-2: #ffffff; --bg-3: #eaeef2;
+  --border: #d0d7de; --border-strong: #afb8c1;
+  --fg: #1f2328; --fg-muted: #656d76; --fg-faint: #8c959f; --fg-bright: #000000;
+  --accent: #0969da; --accent-bg: rgba(9, 105, 218, 0.1); --accent-fg: #ffffff;
+  --ok: #1a7f37; --danger: #cf222e;
+  --shadow-pop: 0 8px 24px rgba(31, 35, 40, 0.15), 0 1px 3px rgba(31, 35, 40, 0.1);
+  --row-hover: rgba(9, 105, 218, 0.06);
+  --row-current: rgba(9, 105, 218, 0.16);
+  --sel-bg: rgba(9, 105, 218, 0.12);
+
+  --lvl-error: #cf222e; --lvl-warn: #9a6700; --lvl-info: #0969da; --lvl-debug: #57606a; --lvl-trace: #8c959f; --lvl-http: #0969da;
+  --tint-strength: 14%;
+
+  --hi-0: #e6db74; --hi-1: #a6e22e; --hi-2: #66d9ef; --hi-3: #fd971f; --hi-4: #ae81ff; --hi-5: #f92672; --hi-6: #e6db74; --hi-7: #a1efe4;
+  --hi-fg: #1f2328;
+  --dur-fast: #1a7f37; --dur-ok: #0969da; --dur-warn: #9a6700; --dur-slow: #cf222e;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg-0: #0d1117; --bg-1: #161b22; --bg-2: #1c2129; --bg-3: #21262d;
+    --border: #30363d; --border-strong: #484f58;
+    --fg: #c9d1d9; --fg-muted: #8b949e; --fg-faint: #6e7681; --fg-bright: #f0f6fc;
+    --accent: #58a6ff; --accent-bg: rgba(88, 166, 255, 0.14); --accent-fg: #0d1117;
+    --ok: #3fb950; --danger: #f85149;
+    --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+    --row-hover: rgba(88, 166, 255, 0.07);
+    --row-current: rgba(88, 166, 255, 0.2);
+    --sel-bg: rgba(88, 166, 255, 0.16);
+    --lvl-error: #f85149; --lvl-warn: #d29922; --lvl-info: #58a6ff; --lvl-debug: #8b949e; --lvl-trace: #484f58; --lvl-http: #58a6ff;
+    --tint-strength: 18%;
+    --hi-fg: #0d1117;
+    --dur-fast: #3fb950; --dur-ok: #58a6ff; --dur-warn: #d29922; --dur-slow: #f85149;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg-0: #0d1117; --bg-1: #161b22; --bg-2: #1c2129; --bg-3: #21262d;
+  --border: #30363d; --border-strong: #484f58;
+  --fg: #c9d1d9; --fg-muted: #8b949e; --fg-faint: #6e7681; --fg-bright: #f0f6fc;
+  --accent: #58a6ff; --accent-bg: rgba(88, 166, 255, 0.14); --accent-fg: #0d1117;
+  --ok: #3fb950; --danger: #f85149;
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+  --row-hover: rgba(88, 166, 255, 0.07);
+  --row-current: rgba(88, 166, 255, 0.2);
+  --sel-bg: rgba(88, 166, 255, 0.16);
+  --lvl-error: #f85149; --lvl-warn: #d29922; --lvl-info: #58a6ff; --lvl-debug: #8b949e; --lvl-trace: #484f58; --lvl-http: #58a6ff;
+  --tint-strength: 18%;
+  --hi-fg: #0d1117;
+  --dur-fast: #3fb950; --dur-ok: #58a6ff; --dur-warn: #d29922; --dur-slow: #f85149;
+  color-scheme: dark;
+}

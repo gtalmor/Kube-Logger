@@ -29,14 +29,16 @@ const PORT = parseInt(process.env.PORT || '4040', 10);
 const HOST = process.env.HOST || '127.0.0.1';
 const ROOT = path.join(__dirname, '..');
 
-// Static roots. PUBLIC_DIR is served at "/". NEXT_DIR (the new viewer while
-// it's being built) at "/next/" and LEGACY_DIR (the old viewer after the
-// cutover) at "/legacy/" are served only when they exist.
-const PUBLIC_DIR = path.resolve(process.env.PUBLIC_DIR || path.join(ROOT, 'public'));
+// Static roots. PUBLIC_DIR is served at "/": the built viewer (web/dist)
+// when it exists, else the legacy public/. LEGACY_DIR is served at "/legacy/"
+// and NEXT_DIR at "/next/" when they exist and differ from PUBLIC_DIR.
+const WEB_DIST = path.join(ROOT, 'web', 'dist');
+const LEGACY = path.join(ROOT, 'public');
+const PUBLIC_DIR = path.resolve(process.env.PUBLIC_DIR || (fs.existsSync(path.join(WEB_DIST, 'index.html')) ? WEB_DIST : LEGACY));
 const MOUNTS = [
-  ['/next/',   path.resolve(process.env.NEXT_DIR   || path.join(ROOT, 'web', 'dist'))],
-  ['/legacy/', path.resolve(process.env.LEGACY_DIR || path.join(ROOT, 'public'))],
-].filter(([prefix, dir]) => dir !== PUBLIC_DIR && fs.existsSync(path.join(dir, 'index.html')));
+  ['/next/',   path.resolve(process.env.NEXT_DIR   || WEB_DIST)],
+  ['/legacy/', path.resolve(process.env.LEGACY_DIR || LEGACY)],
+].filter(([, dir]) => dir !== PUBLIC_DIR && fs.existsSync(path.join(dir, 'index.html')));
 
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data'));
 const STATE_FILE = path.join(DATA_DIR, 'state.json');

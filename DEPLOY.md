@@ -1,229 +1,106 @@
-# Kube Logger — SaaS Deployment
+# Kube Logger — Deployment and release
 
-Target: `logviewer.gtalmor.com` → `/var/www/logviewer/` on a Linux box, behind Nginx Proxy Manager, pm2 process, deployed from GitHub on every push to `main`.
+Target: `logviewer.gtalmor.com` → `/var/www/logviewer/` on a Linux box, behind Nginx Proxy Manager, as a pm2 process, deployed by GitHub Actions on every push to `main`.
 
-## Architecture at a glance
+## Architecture
 
 ```
-user laptop                                your Linux box
-┌──────────────────────────┐               ┌─────────────────────────────────┐
-│ Chrome extension (popup) │  ws://local   │                                 │
-│          │               │◄─────────────►│  agent/index.js   (local only)  │  ← runs on USER's laptop
-│          ▼               │               │  (not deployed on server!)      │
-│ agent (runs on laptop)   │               └─────────────────────────────────┘
-│          │ wss://logviewer.gtalmor.com/producer?session=ABC
-│          ▼
-└──────────┼───────────────┘
-           │
-           ▼
-  ┌────────────────────────────────────────────────────────────────────────┐
-  │                    your Linux box (this repo deployed here)            │
-  │                                                                         │
-  │ Nginx Proxy Manager  ─ TLS terminates ─►  127.0.0.1:4040               │
-  │                                              │                          │
-  │                                              ▼                          │
-  │                                   server/index.js (pm2 "logviewer")    │
-  │                                   - serves public/index.html           │
-  │                                   - routes /producer ↔ /consumer       │
-  └────────────────────────────────────────────────────────────────────────┘
-                                                  ▲
-                                                  │ wss://logviewer.gtalmor.com/consumer?session=ABC
-                                                  │
-                                     ┌────────────┴────────────┐
-                                     │ Browser tab (any laptop)│
-                                     │ https://logviewer…/?s=ABC│
-                                     └─────────────────────────┘
+  user laptop                           your Linux box
+┌─────────────────────────┐            ┌──────────────────────────────────────────┐
+│ kube-logger-agent       │ wss ─────► │ Nginx Proxy Manager (TLS) ─► 127.0.0.1:4040│
+│ (stern / aws / kubectl) │            │   server/index.js  (pm2 "logviewer")     │
+└─────────────────────────┘            │   - serves web/dist at /  (public/ at /legacy/)
+                                       │   - /producer ↔ /consumer per session    │
+                                       │   - data/state.json: session→key hashes  │
+                                       └──────────────────────────────────────────┘
+                                                        ▲ wss /consumer?session=…
+                                                 browser: https://logviewer…/?session=…
 ```
 
-The **server only knows about log lines in flight**. It never has AWS credentials or kubectl access. Every user still runs `agent/index.js` locally with their own AWS SSO login.
+The relay only ever sees log lines in flight (plus a bounded per-session replay buffer). It never has AWS credentials or cluster access.
 
----
+## Protocol (v2)
 
-## 1. First-time server setup
+- Agent → relay: `init`, `capture-start {captureId}`, `capture-state` (resync, not fanned out), `log-batch {items:[{i,ns,line}]}`, `capture-stop/end`, `cleared`, `stream-end`, `ns-added`, `ns-refiltered`, `stderr`, `error`, `auth-*`, `cluster-pick`, `namespaces`, `pods`.
+- Relay → agent: `producer-hello {captureId, lastIndex, lines}` after connect; the agent replays only the lines the relay is missing.
+- Relay → viewer: `relay-hello`, `history-begin` … stored `log-batch` frames … `history-end`, then live frames. Viewer actions are forwarded to the agent verbatim; the relay interprets none.
+- The first producer on a session binds its key; the binding is persisted (sha256) in `data/state.json` for 90 days of inactivity. A different key gets HTTP 401 (and `GET /producer/check` explains why). Consumers whose socket buffer exceeds 16 MB are closed with code 4002.
 
-Assumes Ubuntu/Debian. Adjust for your distro.
-
-### 1a. Install prerequisites
+## 1. First-time server setup (Ubuntu/Debian)
 
 ```bash
-# Node 20 (LTS) + git
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs git
+sudo apt install -y nodejs
 sudo npm install -g pm2
-
-# Verify
-node -v && npm -v && pm2 --version
+sudo mkdir -p /var/www/logviewer && sudo chown -R $USER:$USER /var/www/logviewer
 ```
 
-### 1b. Create the app directory
-
-```bash
-sudo mkdir -p /var/www/logviewer
-sudo chown -R $USER:$USER /var/www/logviewer
-```
-
-### 1c. Authenticate to GitHub (private repo)
-
-Install the GitHub CLI and log in once; it wires up git's credential helper so
-every subsequent `git fetch`/`git pull` on the box just works.
-
-```bash
-curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-  | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-  | sudo tee /etc/apt/sources.list.d/github-cli.list
-sudo apt update && sudo apt install -y gh
-
-# Interactive: pick GitHub.com → HTTPS → "Login with a web browser" → enter the
-# one-time code it prints at https://github.com/login/device.
-gh auth login
-gh auth setup-git
-```
-
-Verify: `gh auth status` should show you logged in.
-
-> Note: `gh auth login` authenticates as **you** (your whole GitHub account).
-> For a shared or long-lived server you'd prefer a read-only per-repo **Deploy
-> key** instead; see the `Option A` section in the original conversation or
-> swap in whenever you're ready.
-
-### 1d. Clone and install
+The server needs no GitHub credential: CI rsyncs the built checkout to it. For the very first start, either push once to `main` (section 2) or copy the repo manually and run:
 
 ```bash
 cd /var/www/logviewer
-git clone https://github.com/<your-org>/<your-repo>.git .
-
 npm ci --omit=dev
 mkdir -p logs
-```
-
-### 1e. Start with pm2
-
-```bash
 pm2 start ecosystem.config.js --env production
 pm2 save
-pm2 startup          # prints a sudo command — run it to make pm2 survive reboots
+pm2 startup          # prints a sudo command — run it to survive reboots
+curl -s http://127.0.0.1:4040/health   # → ok
 ```
 
-Check it's alive:
+### Nginx Proxy Manager
+
+Add a Proxy Host: domain `logviewer.gtalmor.com`, scheme `http`, forward `127.0.0.1:4040`, **Websockets support ON**, Block common exploits on, Let's Encrypt cert with Force SSL + HTTP/2.
+
+### Environment (ecosystem.config.js)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `HOST` / `PORT` | `127.0.0.1` / `4040` | Bind address. Keep loopback behind NPM. |
+| `PUBLIC_DIR` | `web/dist` if built, else `public` | Static root served at `/`. |
+| `LEGACY_DIR` | `public` | Served at `/legacy/` while the old viewer is kept. |
+| `DATA_DIR` | `./data` | Holds `state.json` (key bindings). Excluded from rsync. |
+| `HISTORY_MAX_LINES` / `HISTORY_MAX_BYTES` | 20000 / 10 MB | Per-session replay buffer. |
+| `CONSUMER_MAX_BUFFERED_BYTES` | 16 MB | Slow-consumer kick threshold. |
+
+## 2. CI/CD
+
+### Deploy (`.github/workflows/deploy.yml`)
+
+On push to `main`: a `test` job runs `npm test` and the viewer tests; then `deploy` builds `web/` on the runner, rsyncs the checkout (excluding `.git`, `node_modules`, `web/node_modules`, `web/src`, `web/fixtures`, `test`, `logs`, `data`, `.env`) to the server, runs `npm ci --omit=dev` and `pm2 reload logviewer`.
+
+Secrets: `DEPLOY_KEY` (private SSH key whose public half is in the server's `authorized_keys`), `SSH_USER`, `SSH_HOST`, `APP_DIR` (`/var/www/logviewer`).
 
 ```bash
-curl -s http://127.0.0.1:4040/health  # → "ok"
-pm2 logs logviewer --lines 30
+ssh-keygen -t ed25519 -f ~/.ssh/logviewer_deploy -N '' -C github-actions-deploy
+ssh-copy-id -i ~/.ssh/logviewer_deploy.pub <user>@<server>
+ssh <user>@<server> 'bash -lc "which pm2"'     # pm2 must be on PATH in a login shell
 ```
 
-### 1f. Put it behind Nginx Proxy Manager
+### Release (`.github/workflows/release.yml`)
 
-In NPM's UI, add a new Proxy Host:
+Push a tag `vX.Y.Z` (or dispatch with a tag). The `test` job gates a `build` job that stamps the tag into `package.json`, cross-compiles the agent with bun for darwin/linux × arm64/x64, writes `SHA256SUMS`, and creates the GitHub release with generated notes.
 
-- **Domain:** `logviewer.gtalmor.com`
-- **Scheme:** `http`
-- **Forward hostname / IP:** `127.0.0.1`
-- **Forward port:** `4040`
-- **Cache assets:** off
-- **Block common exploits:** on
-- **Websockets support:** **ON** (critical — without this `/producer` and `/consumer` won't upgrade)
-- **SSL tab:** request a Let's Encrypt cert for the domain, force SSL, HTTP/2 on.
+A `tap` job then rewrites `Formula/kube-logger-agent.rb` in `gtalmor/homebrew-kube-logger` (version, download URLs, four sha256s) and pushes it. It needs a repository secret **`TAP_TOKEN`**: a fine-grained PAT with *Contents: read and write* on the tap repo. Without the secret the job is skipped and the formula must be bumped by hand.
 
-Point your DNS `logviewer.gtalmor.com` → the box's public IP, wait for propagation, then NPM can issue the cert.
-
-### 1f. Smoke-test the relay
-
-From any machine:
+Cutting a release:
 
 ```bash
-curl https://logviewer.gtalmor.com/health   # → "ok"
+npm version 0.3.0 --no-git-tag-version      # keep package.json in sync with the tag
+git commit -am "chore: release v0.3.0"
+git tag v0.3.0 && git push origin main v0.3.0
 ```
 
-Open `https://logviewer.gtalmor.com/` in a browser — you should see the viewer UI with "No session — add ?s=<id> to the URL" in the status bar. That's expected; the viewer only activates once a session id is in the query string.
+Users then upgrade with `brew update && brew upgrade kube-logger-agent`. The agent prints an upgrade banner when a newer release exists.
 
----
-
-## 2. GitHub CI/CD (auto-deploy on push to `main`)
-
-### 2a. Create a deploy SSH key (on your laptop, **not** the server)
+## 3. Ops cheatsheet
 
 ```bash
-ssh-keygen -t ed25519 -f ~/.ssh/logviewer_deploy -N '' -C 'github-actions-deploy'
+pm2 status
+pm2 logs logviewer --lines 100
+pm2 reload logviewer                 # zero-downtime
+curl http://127.0.0.1:4040/health    # liveness
+curl http://127.0.0.1:4040/stats     # {"sessions","consumers","bindings","uptime"}
+cat /var/www/logviewer/data/state.json | head -c 300   # key bindings (hashed)
 ```
 
-### 2b. Add the public key to the server
-
-```bash
-# Copy ~/.ssh/logviewer_deploy.pub into the server's authorized_keys
-ssh-copy-id -i ~/.ssh/logviewer_deploy.pub <user>@<server-ip>
-# Or paste it manually into ~/.ssh/authorized_keys on the server.
-```
-
-Test: `ssh -i ~/.ssh/logviewer_deploy <user>@<server-ip> 'echo ok'` should print `ok`.
-
-### 2c. Add GitHub repository secrets
-
-In your repo: **Settings → Secrets and variables → Actions → New repository secret**.
-
-| Name         | Value                                             |
-| ------------ | ------------------------------------------------- |
-| `DEPLOY_KEY` | Contents of `~/.ssh/logviewer_deploy` (the **private** key, full file) |
-| `SSH_USER`   | The Linux user that owns `/var/www/logviewer/`     |
-| `SSH_HOST`   | The server's hostname or IP                        |
-| `APP_DIR`    | `/var/www/logviewer`                               |
-
-### 2d. Ensure pm2 works in non-interactive shells
-
-The deploy workflow SSHes in and runs `pm2` under bash. pm2 needs to be on PATH in a login shell. Check:
-
-```bash
-ssh <user>@<server> 'bash -lc "which pm2"'
-```
-
-If nothing prints, add `export PATH="$PATH:$(npm prefix -g)/bin"` to `~/.profile` on the server.
-
-### 2e. Push and verify
-
-Push any change to `main`. Actions tab → you should see the `Deploy SaaS relay` workflow run; it ssh's in, pulls, installs, and reloads pm2. `pm2 describe logviewer` should show a new `restart_time`.
-
----
-
-## 3. How users consume the SaaS
-
-Each user on their own laptop:
-
-1. Install the Chrome extension (loaded unpacked from the `extension/` folder, or published to the Chrome Web Store).
-2. Run the local agent somewhere:
-   ```bash
-   git clone <repo>
-   cd <repo>
-   npm ci
-   npm run start:agent
-   ```
-   (Requires `aws` CLI, `stern`, and `kubectl` on their `$PATH`. AWS SSO login is handled via the popup as before.)
-3. Open the popup → `Relay` opens a small config — default `https://logviewer.gtalmor.com` is already set.
-4. Pick a profile, authenticate, pick namespace(s), click **Start Capture**.
-5. The popup generates a random 128-bit session id, tells the local agent to open an outbound `wss://logviewer.gtalmor.com/producer?session=…`, and opens the web viewer at `https://logviewer.gtalmor.com/?s=…` in a new tab.
-6. Logs stream from the user's laptop → through the relay → into the viewer tab. Multiple viewers can open the same session URL.
-
-No AWS credentials ever leave the user's laptop. The relay only sees log lines.
-
----
-
-## 4. Ops cheatsheet
-
-```bash
-pm2 status                          # running processes
-pm2 logs logviewer --lines 100      # tail logs
-pm2 restart logviewer               # hard restart
-pm2 reload logviewer                # zero-downtime reload
-pm2 describe logviewer              # details + restart count
-
-curl http://127.0.0.1:4040/health   # liveness
-curl http://127.0.0.1:4040/stats    # active session count, uptime
-```
-
-If a deploy gets stuck, `ssh` to the box and:
-
-```bash
-cd /var/www/logviewer
-git status
-git log -1 --oneline
-pm2 logs logviewer --err --lines 50
-```
+Removing a binding (e.g. a user lost their producer key and wants to reuse the session id): edit `data/state.json`, delete the session's entry, `pm2 reload logviewer`. Simpler for the user: `kube-logger-agent --new-session`.
