@@ -5,3 +5,5 @@ logs/
 *.log
 dist/
 data/
+web/node_modules/
+web/dist/
