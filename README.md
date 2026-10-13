@@ -120,6 +120,7 @@ kube-logger-agent --help
 | `--max-log-requests <n>` | Starting (and, when given, maximum) number of concurrent pod streams for stern. Default 100, auto-doubles up to 5000. |
 | `KUBE_LOGGER_RELAY` | Relay base URL (default `https://logviewer.gtalmor.com`). Use `http://localhost:4040` for local development. |
 | `KUBE_LOGGER_STERN` | Path to stern. |
+| `KUBE_LOGGER_NO_SYSTEM_CA=1` | Don't trust the OS certificate store (see Troubleshooting). |
 | `KUBE_LOGGER_NO_BROWSER=1` | Don't open the viewer on boot. |
 | `KUBE_LOGGER_NO_UPDATE_CHECK=1` | Skip the GitHub release check. |
 | `KUBE_LOGGER_FORCE=1` | In non-TTY runs, take over an existing agent instead of refusing. |
@@ -140,6 +141,8 @@ kube-logger-agent --help
 **"Waiting for agent…"** The agent isn't running or can't reach the relay. Look for `[saas] connected` in its terminal.
 
 **"The relay rejected this agent: another agent owns session …"** The session id is bound to a different producer key (another machine, or a lost `~/.kube-logger/producer-key`). Run `kube-logger-agent --new-session`, or copy the key from the owning machine.
+
+**"TLS handshake failed" / "unable to get local issuer certificate" while browsers work.** A corporate proxy (Zscaler and the like) is re-signing TLS with its own CA. Since 0.3.2 the agent exports the OS-trusted certificates to `~/.kube-logger/ca-bundle.pem` and re-runs itself with `NODE_EXTRA_CA_CERTS` pointing at it, so this should just work; set `KUBE_LOGGER_NO_SYSTEM_CA=1` to disable that, or point `NODE_EXTRA_CA_CERTS` at your own bundle.
 
 **"stern not found"** Install stern or set `KUBE_LOGGER_STERN`. Auth and namespace listing still work without it.
 

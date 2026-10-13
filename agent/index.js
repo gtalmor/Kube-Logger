@@ -76,6 +76,10 @@ ENVIRONMENT
                                pointing at a local relay for testing.
   KUBE_LOGGER_STERN            Path to the stern binary (default: "stern"
                                found on PATH). stern is required.
+  KUBE_LOGGER_NO_SYSTEM_CA=1   Don't trust the OS certificate store. By default
+                               the agent exports the system/keychain CAs and
+                               re-runs itself with NODE_EXTRA_CA_CERTS so TLS-
+                               intercepting proxies (Zscaler etc.) work.
   KUBE_LOGGER_NO_BROWSER=1     Don't auto-open the viewer on boot.
   KUBE_LOGGER_NO_UPDATE_CHECK=1
                                Skip the GitHub release check.
@@ -926,7 +930,58 @@ function checkForUpdate() {
   });
 }
 
+// ── Corporate TLS interception (Zscaler & co.) ─────────────────────
+// bun/node ship their own CA list and ignore the OS trust store, so behind a
+// TLS-intercepting proxy every wss:// connect fails with "TLS handshake
+// failed" even though browsers and curl work. NODE_EXTRA_CA_CERTS is honoured
+// by both runtimes but only at process start, so: export the OS-trusted
+// certificates to a PEM bundle and re-run ourselves with the variable set.
+// Opt out with KUBE_LOGGER_NO_SYSTEM_CA=1; a user-provided NODE_EXTRA_CA_CERTS
+// is left alone.
+const CA_BUNDLE_FILE = path.join(CONFIG_DIR, 'ca-bundle.pem');
+const { execFileSync } = require('child_process');
+
+function systemCaBundle() {
+  if (process.platform === 'darwin') {
+    let pem = '';
+    for (const kc of ['/Library/Keychains/System.keychain', path.join(os.homedir(), 'Library', 'Keychains', 'login.keychain-db')]) {
+      try { pem += execFileSync('security', ['find-certificate', '-a', '-p', kc], { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 16 * 1024 * 1024 }).toString(); } catch {}
+    }
+    if (!pem.includes('BEGIN CERTIFICATE')) return null;
+    try {
+      fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(CA_BUNDLE_FILE, pem, { mode: 0o600 });
+      return CA_BUNDLE_FILE;
+    } catch { return null; }
+  }
+  for (const f of ['/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt', '/etc/ssl/ca-bundle.pem', '/etc/ssl/cert.pem']) {
+    if (fs.existsSync(f)) return f;
+  }
+  return null;
+}
+
+// Returns true when a child was spawned and this process should just wait.
+function reexecWithSystemCa() {
+  if (process.env.KUBE_LOGGER_NO_SYSTEM_CA || process.env.KUBE_LOGGER_CA_REEXEC || process.env.NODE_EXTRA_CA_CERTS) return false;
+  const bundle = systemCaBundle();
+  if (!bundle) return false;
+  const isBun = typeof Bun !== 'undefined';
+  const args = isBun ? process.argv.slice(2) : [process.argv[1], ...process.argv.slice(2)];
+  const child = spawn(process.execPath, args, {
+    stdio: 'inherit',
+    env: { ...process.env, NODE_EXTRA_CA_CERTS: bundle, KUBE_LOGGER_CA_REEXEC: '1' },
+  });
+  const forward = sig => () => { try { child.kill(sig); } catch {} };
+  process.on('SIGINT', forward('SIGINT'));
+  process.on('SIGTERM', forward('SIGTERM'));
+  process.on('SIGHUP', forward('SIGHUP'));
+  child.on('exit', (code, sig) => process.exit(code != null ? code : (sig ? 1 : 0)));
+  child.on('error', e => { console.error(`[agent] could not re-exec with system CA bundle: ${e.message}`); process.exit(1); });
+  return true;
+}
+
 (async function start() {
+  if (reexecWithSystemCa()) return;
   const { freshSession } = await promptDuplicateAgent();
   if (freshSession) {
     SESSION_ID = crypto.randomBytes(16).toString('hex');
