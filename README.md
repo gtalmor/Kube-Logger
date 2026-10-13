@@ -55,8 +55,8 @@ On first run it creates `~/.kube-logger/` with a persistent session id, a produc
   Tool: stern (/opt/homebrew/bin/stern) | Region: us-east-1 | Clusters configured: 2
   Viewer: https://logviewer.gtalmor.com/?session=<your-session-id>
 
-[relay] connecting to wss://logviewer.gtalmor.com/producer?session=<your-session-id>
-[relay] connected
+[saas] connecting to wss://logviewer.gtalmor.com/producer?session=<your-session-id>
+[saas] connected
 ```
 
 Leave the agent running. The session id is persistent, so bookmark the URL once. **Treat the URL as a secret**: anyone who has it can drive your agent (start captures, trigger logins). Rotate it with `kube-logger-agent --new-session`.
@@ -137,7 +137,7 @@ kube-logger-agent --help
 
 ## Troubleshooting
 
-**"Waiting for agent…"** The agent isn't running or can't reach the relay. Look for `[relay] connected` in its terminal.
+**"Waiting for agent…"** The agent isn't running or can't reach the relay. Look for `[saas] connected` in its terminal.
 
 **"The relay rejected this agent: another agent owns session …"** The session id is bound to a different producer key (another machine, or a lost `~/.kube-logger/producer-key`). Run `kube-logger-agent --new-session`, or copy the key from the owning machine.
 

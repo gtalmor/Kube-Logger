@@ -339,7 +339,9 @@ function connectProducer() {
   if (producer && producer.readyState !== 3 /* CLOSED */) return;
   const { WebSocket } = require('ws');
   const wsUrl = `${RELAY_WS_URL}/producer?session=${encodeURIComponent(SESSION_ID)}&key=${encodeURIComponent(PRODUCER_KEY)}`;
-  console.log(`[relay] connecting to ${RELAY_WS_URL}/producer?session=${SESSION_ID}`);
+  // Keep the "[saas] connecting" / "[saas] connected" wording: Assume Keycloaker
+  // and other wrappers parse these lines to show the agent's status.
+  console.log(`[saas] connecting to ${RELAY_WS_URL}/producer?session=${SESSION_ID}`);
   const ws = new WebSocket(wsUrl);
   producer = ws;
   let opened = false;
@@ -347,7 +349,7 @@ function connectProducer() {
   ws.on('open', () => {
     opened = true;
     reconnectDelay = 3000;
-    console.log(`[relay] connected (session ${SESSION_ID.slice(0, 8)}…)`);
+    console.log(`[saas] connected (session ${SESSION_ID.slice(0, 8)}…)`);
     ws.send(JSON.stringify(buildInitMessage()));
     // History is replayed only after the relay tells us what it already has
     // (producer-hello), so a blip doesn't re-send 20k lines.
@@ -372,13 +374,13 @@ function connectProducer() {
       if (producer === ws) producer = null;
       opened = true; // don't classify again from 'close'
       if (res.statusCode === 401) explainRejectedAndExit();
-      console.error(`[relay] connect rejected with HTTP ${res.statusCode}; retrying in ${reconnectDelay / 1000}s`);
+      console.error(`[saas] connect rejected with HTTP ${res.statusCode}; retrying in ${reconnectDelay / 1000}s`);
       scheduleReconnect();
     });
   }
 
   ws.on('close', (code, reason) => {
-    console.log(`[relay] disconnected (code ${code}, reason: ${scrubKey(reason || 'n/a')})`);
+    console.log(`[saas] disconnected (code ${code}, reason: ${scrubKey(reason || 'n/a')})`);
     if (producer === ws) producer = null;
     replaying = false;
     // Code 4000 = the relay kicked us because a newer agent (same session+key)
@@ -397,7 +399,7 @@ function connectProducer() {
     // Node's ws reports HTTP rejections via 'unexpected-response'; everything
     // else (ECONNREFUSED, DNS, TLS, and bun's upgrade failures) lands here and
     // 'close' decides whether to classify or retry.
-    if (!/Unexpected server response/.test(e.message)) console.error(`[relay] error: ${scrubKey(e.message)}`);
+    if (!/Unexpected server response/.test(e.message)) console.error(`[saas] error: ${scrubKey(e.message)}`);
   });
 }
 
@@ -413,13 +415,13 @@ function handleProducerHello(ws, hello) {
   }));
   const same = hello.captureId === capture.id && Number.isFinite(hello.lastIndex);
   const from = same ? hello.lastIndex + 1 : ring.firstIndex;
-  replayFrom(ws, capture, from).catch(e => console.error(`[relay] replay failed: ${e.message}`));
+  replayFrom(ws, capture, from).catch(e => console.error(`[saas] replay failed: ${e.message}`));
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function replayFrom(ws, cap, from) {
   if (from > cap.ring.lastIndex) return;
-  console.log(`[relay] replaying from ${Math.max(from, cap.ring.firstIndex)} (ring ${cap.ring.firstIndex}..${cap.ring.lastIndex})`);
+  console.log(`[saas] replaying from ${Math.max(from, cap.ring.firstIndex)} (ring ${cap.ring.firstIndex}..${cap.ring.lastIndex})`);
   // Lines queued in the batcher are in the ring too; the loop below covers them.
   batcher.discard();
   replaying = true;
