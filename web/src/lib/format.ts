@@ -13,6 +13,10 @@ export function fmtTs(ts: number | undefined, fallback?: string): string {
 export function fmtClock(ts: number): string {
   try { return new Date(ts).toISOString().slice(11, 19); } catch { return ''; }
 }
+/** Wall-clock time in the viewer's zone, for "since 09:44:21" style labels. */
+export function fmtLocalClock(ts: number): string {
+  try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); } catch { return ''; }
+}
 
 /** "io-flow-engine-7d9f8c6b5-x1k2q" → "flow-engine"; other long names get truncated. */
 export function shortPod(p: string | undefined): string {

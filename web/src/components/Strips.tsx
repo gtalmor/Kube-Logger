@@ -6,7 +6,9 @@ import { login, selectedProfile, selectProfile } from '../state/setup';
 import { filters, hideExec, clearHiddenExecs } from '../state/filters';
 import { stripsCollapsed, toggleStrip } from '../state/ui';
 import { labelOf } from '../state/flowDefs';
-import { fmtMs, durBucket, fmtCount } from '../lib/format';
+import { fmtMs, durBucket, fmtCount, fmtLocalClock } from '../lib/format';
+import { streamStatus } from '../state/streams';
+import { hintFor } from '../lib/stderr';
 import type { LogLine } from '../lib/parse';
 import { showNodePopover } from './FailurePopover';
 import { toast } from '../state/toasts';
@@ -25,6 +27,26 @@ export function AuthBanner() {
       <span class="strip-icon">⚠</span>
       <span class="strip-text"><b>{head}</b>{a.profile ? ` for ${a.profile}` : ''}{a.err ? ` — ${String(a.err).slice(0, 140)}` : ''}</span>
       <button class="btn sm" onClick={() => { if (a.profile && !selectedProfile.value) selectProfile(a.profile); login(); toast('Login started on the agent machine'); }}>Re-login</button>
+    </div>
+  );
+}
+
+/** One banner while the agent is restarting streams that can't reach the cluster. */
+export function StreamStrip() {
+  const st = streamStatus.value;
+  const ns = Object.keys(st).sort();
+  if (!ns.length) return null;
+  const worst = ns.map(n => st[n]).sort((a, b) => b.restarts - a.restarts)[0];
+  const hint = hintFor(worst.reason);
+  const since = Math.min(...ns.map(n => st[n].since ?? Infinity));
+  return (
+    <div class="strip auth-strip stream-strip" title={ns.map(n => `${n}: ${st[n].reason}`).join('\n')}>
+      <span class="strip-icon">⚠</span>
+      <span class="strip-text">
+        <b>Stream{ns.length > 1 ? 's' : ''} down: {ns.join(', ')}</b>
+        {' — '}{hint || worst.reason || 'stern cannot reach the cluster'}
+        <span class="muted"> · agent retrying{worst.restarts ? ` (×${worst.restarts})` : ''}{Number.isFinite(since) ? ` since ${fmtLocalClock(since)}` : ''}</span>
+      </span>
     </div>
   );
 }

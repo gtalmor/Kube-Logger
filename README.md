@@ -144,6 +144,8 @@ kube-logger-agent --help
 
 **"The relay rejected this agent: another agent owns session …"** The session id is bound to a different producer key (another machine, or a lost `~/.kube-logger/producer-key`). Run `kube-logger-agent --new-session`, or copy the key from the owning machine.
 
+**"Watch failed … no such host" / a "Stream down" banner in the viewer.** stern lost the cluster API, typically after a network change (VPN on/off, office Wi-Fi): client-go then retries every second with a stale resolver. Since 0.3.4 the agent restarts the affected stream after a burst of failures and keeps retrying with backoff (3 s → 60 s) until lines flow again; the viewer shows one banner with the reason instead of a toast per retry. If the reason names a `proxyconnect … lookup <host>: no such host`, that host is the `proxy-url` in your kubeconfig for that cluster and only resolves on the VPN; connect to it, or drop the proxy if the API is reachable directly.
+
 **"TLS handshake failed" / "unable to get local issuer certificate" while browsers work.** A corporate proxy (Zscaler and the like) is re-signing TLS with its own CA. Since 0.3.2 the agent exports the OS-trusted certificates to `~/.kube-logger/ca-bundle.pem` and re-runs itself with `NODE_EXTRA_CA_CERTS` pointing at it, so this should just work; set `KUBE_LOGGER_NO_SYSTEM_CA=1` to disable that, or point `NODE_EXTRA_CA_CERTS` at your own bundle.
 
 **"stern not found"** Install stern or set `KUBE_LOGGER_STERN`. Auth and namespace listing still work without it.

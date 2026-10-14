@@ -16,6 +16,7 @@ const fs = require('fs');
 
 const V = require('./lib/validate');
 const { LineRing } = require('./lib/ring');
+const { StreamHealth, failureReason } = require('./lib/health');
 const { LogBatcher } = require('./lib/batch');
 const { podQuery, parsePodsOutput, PODS_JSONPATH } = require('./lib/workloads');
 const { isNewerVersion } = require('./lib/version');
@@ -293,9 +294,11 @@ let authCache = null;  // { ts, profile, ok, arn, account, err, expiresAt, clust
 
 const RING_MAX_LINES = 20000;
 const RING_MAX_BYTES = 10 * 1024 * 1024;
-const WATCH_FAIL_LIMIT = 15;          // consecutive-ish watch failures …
-const WATCH_FAIL_WINDOW_MS = 60000;   // … within this window → restart the stream
-const WATCH_RESTART_DELAY_MS = 3000;
+// stern's watch does not recover from a network change (VPN on/off, office
+// Wi-Fi): client-go retries "Watch failed" every second with a stale resolver.
+// StreamHealth (per capture) restarts a stream after a burst of these, backing
+// off while the network stays broken, and rate-limits what reaches the viewer.
+const WATCH_FAIL_RE = /Watch failed|connection refused|no such host|i\/o timeout|TLS handshake timeout/i;
 
 // ── Relay producer connection ───────────────────────────────────────
 let producer = null;           // live ws to the relay
@@ -599,7 +602,18 @@ function buildInitMessage() {
     captureId: capture ? capture.id : null,
     start: capture ? capture.start : null,
     n: capture ? capture.ring.total : 0,
+    streams: capture ? degradedStreams(capture) : {},
   };
+}
+
+/** Namespaces whose stream is currently being restarted (for a viewer that loads mid-outage). */
+function degradedStreams(cap) {
+  const out = {};
+  for (const ns of cap.nsList) {
+    const st = cap.health.status(ns);
+    if (st.degraded) out[ns] = { state: 'degraded', reason: st.reason, restarts: st.restarts, since: st.since };
+  }
+  return out;
 }
 
 // Validate a profile from the viewer: well-formed and actually configured.
@@ -696,6 +710,7 @@ function attachStream(ns, startLimit) {
   proc.stdout.on('data', chunk => {
     if (!isCurrent()) return;
     if (firstData) { firstData = false; console.log(`[${ns}] first line received`); }
+    if (cap.health.healthy(ns)) { console.log(`[${ns}] stream recovered`); broadcast({ type: 'stream-status', ns, state: 'ok' }); }
     buf += chunk.toString();
     const parts = buf.split('\n');
     buf = parts.pop();
@@ -708,31 +723,11 @@ function attachStream(ns, startLimit) {
     }
   });
 
-  // stern's watch does not recover from a network change (VPN on/off, office
-  // Wi-Fi): client-go retries "Watch failed" forever with a stale resolver.
-  // After a burst of failures, respawn this namespace's stream.
-  const watchFails = [];
-  let restarted = false;
   proc.stderr.on('data', d => {
     const msg = d.toString().trim();
     if (!msg || msg.includes('ExperimentalWarning')) return;
     stderrBuf += msg + '\n';
     if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000);
-    console.error(`[${ns}] stderr: ${msg.slice(0, 500)}`);
-    if (/Watch failed|connection refused|no such host|i\/o timeout|TLS handshake timeout/i.test(msg) && isCurrent() && !restarted) {
-      const now = Date.now();
-      watchFails.push(now);
-      while (watchFails.length && now - watchFails[0] > WATCH_FAIL_WINDOW_MS) watchFails.shift();
-      if (watchFails.length >= WATCH_FAIL_LIMIT) {
-        restarted = true;
-        console.error(`[${ns}] ${watchFails.length} watch failures in ${WATCH_FAIL_WINDOW_MS / 1000}s — restarting stream`);
-        broadcast({ type: 'stderr', ns, msg: `Restarting the ${ns} stream after repeated watch failures (network change?)` });
-        cap.procs.delete(ns);
-        setTimeout(() => { if (capture === cap && !cap.procs.has(ns)) attachStream(ns, limit); }, WATCH_RESTART_DELAY_MS);
-        killLater(proc);
-        return;
-      }
-    }
     // Early auth-expiration detection: stern surfaces these long before the
     // 60s periodic checkAuth would.
     if (/Token has expired|ExpiredToken|InvalidClientTokenId|UnauthorizedOperation|refresh failed|ExpiredTokenException|unable to get a Token|SSOTokenLoadError/i.test(msg)) {
@@ -740,6 +735,23 @@ function attachStream(ns, startLimit) {
       authCache = { ts: Date.now(), profile: prev.profile, ok: false, err: 'SSO token expired — re-login' };
       broadcast(authStatusMessage());
     }
+    if (WATCH_FAIL_RE.test(msg)) {
+      if (!isCurrent()) return;   // a stream we already replaced: nothing to report
+      const r = cap.health.failure(ns, failureReason(msg));
+      if (r.forward) {            // one line per minute per namespace, not one per retry
+        console.error(`[${ns}] stderr: ${msg.slice(0, 500)}`);
+        broadcast({ type: 'stderr', ns, msg });
+      }
+      if (r.restart) {
+        console.error(`[${ns}] ${r.failures} watch failures in a minute — restarting stream in ${r.delayMs / 1000}s (restart #${r.restarts})`);
+        broadcast({ type: 'stream-status', ns, state: 'degraded', reason: r.reason, restarts: r.restarts, since: r.since, retryInMs: r.delayMs });
+        cap.procs.delete(ns);
+        setTimeout(() => { if (capture === cap && !cap.procs.has(ns)) attachStream(ns, limit); }, r.delayMs);
+        killLater(proc);
+      }
+      return;
+    }
+    console.error(`[${ns}] stderr: ${msg.slice(0, 500)}`);
     if (isCurrent()) broadcast({ type: 'stderr', ns, msg });
   });
 
@@ -813,6 +825,7 @@ function startCapture(nsList, filters, send) {
     procs: new Map(), nsList: [], start: Date.now(),
     ring: new LineRing({ maxLines: RING_MAX_LINES, maxBytes: RING_MAX_BYTES }),
     filters: new Map(),
+    health: new StreamHealth(),
   };
   mergeFilters(filters);
   for (const ns of nsList) attachStream(ns);

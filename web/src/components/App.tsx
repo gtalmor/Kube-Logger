@@ -1,6 +1,6 @@
 import { useEffect } from 'preact/hooks';
 import { Header } from './Header';
-import { AuthBanner, ErrorStrip, FlowTimelineStrip } from './Strips';
+import { AuthBanner, ErrorStrip, FlowTimelineStrip, StreamStrip } from './Strips';
 import { LogList } from './LogList';
 import { Welcome, readFileInto } from './Welcome';
 import { SidePanel } from './SidePanel';
@@ -39,6 +39,7 @@ export function App() {
     <div class="app">
       <Header />
       <AuthBanner />
+      <StreamStrip />
       <ErrorStrip />
       <FlowTimelineStrip />
       <div class="main">

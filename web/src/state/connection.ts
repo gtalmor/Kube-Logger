@@ -4,6 +4,8 @@ import { loadLastSession, saveLastSession } from '../lib/storage';
 import { store } from './app';
 import * as setup from './setup';
 import { toast } from './toasts';
+import { failureReason, hintFor, stderrKey, stripKlog, WATCH_FAIL_RE } from '../lib/stderr';
+import { applyStreamStatus, clearStreamStatus, isDegraded } from './streams';
 
 export interface AuthState {
   ok: boolean; profile?: string; arn?: string; account?: string; err?: string;
@@ -72,24 +74,24 @@ function scheduleReconnect(): void {
 type Msg = Record<string, any> & { type: string };
 
 // stern repeats the same stderr line on every retry (e.g. "Watch failed"
-// every second per namespace). Collapse repeats: one toast per distinct
-// message per minute, with a running count, and strip the klog prefix.
+// every second per namespace). The agent already forwards at most one such
+// line per minute per namespace; here identical lines are collapsed further
+// and, once the agent has flagged the stream as degraded, dropped in favour
+// of the StreamStrip banner.
 const stderrSeen = new Map<string, { at: number; n: number }>();
 function stderrToast(ns: string | undefined, msg: string): void {
-  const clean = msg.replace(/^[EWI]\d{4} \d\d:\d\d:\d\d\.\d+\s+\d+\s+\S+\]\s*/, '');  // klog "E1014 09:30:25.966687 34823 retrywatcher.go:129] "
-  const key = (ns || '') + '|' + clean.replace(/\d+/g, '#').slice(0, 160);
+  if (WATCH_FAIL_RE.test(msg) && isDegraded(ns)) return;
+  const watch = WATCH_FAIL_RE.test(msg);
+  const clean = watch ? `Watch failed: ${failureReason(msg)}` : stripKlog(msg);
+  const key = stderrKey(ns, clean);
   const now = Date.now();
   const seen = stderrSeen.get(key);
   if (seen && now - seen.at < 60000) { seen.n++; return; }
   const n = seen ? seen.n : 0;
   stderrSeen.set(key, { at: now, n: 1 });
   if (stderrSeen.size > 200) { const oldest = [...stderrSeen.entries()].sort((a, b) => a[1].at - b[1].at)[0]; if (oldest) stderrSeen.delete(oldest[0]); }
-  const nx = /lookup ([^:\s"]+): no such host/.exec(clean);
-  const hint = nx && /proxyconnect/.test(clean)
-    ? ` — the proxy ${nx[1]} from your kubeconfig doesn't resolve on this network (VPN off?); stern can't reach the cluster API`
-    : nx ? ` — ${nx[1]} doesn't resolve on this network`
-    : /proxyconnect/.test(clean) ? ' — the kubeconfig proxy is unreachable on this network' : '';
-  toast(`${ns ? `[${ns}] ` : ''}${clean.slice(0, 160)}${n > 1 ? ` (×${n} in the last minute)` : ''}${hint}`, 'error', 6000);
+  const hint = hintFor(failureReason(msg));
+  toast(`${ns ? `[${ns}] ` : ''}${clean.slice(0, 160)}${n > 1 ? ` (×${n} in the last minute)` : ''}${hint ? ` — ${hint}` : ''}`, 'error', 6000);
 }
 
 function setCapture(active: boolean, m: Partial<Msg> = {}): void {
@@ -115,11 +117,14 @@ export function dispatch(m: Msg): void {
     case 'producer-gone':
       agentConnected.value = false;
       setCapture(false);
+      clearStreamStatus();
       toast('Agent disconnected', 'error');
       break;
 
     case 'init': {
       agentInfo.value = { tool: m.tool, sternAvailable: m.sternAvailable };
+      clearStreamStatus();
+      if (m.streams && typeof m.streams === 'object') for (const [ns, st] of Object.entries(m.streams as Record<string, Record<string, unknown>>)) applyStreamStatus({ ...st, ns });
       if (m.auth) auth.value = { ...m.auth, ok: !!(m.auth.ok || m.auth.authenticated) };
       if (m.capturing) {
         store.resetForCapture(m.captureId ?? null, m.start ?? null, Array.isArray(m.ns) ? m.ns : []);
@@ -134,6 +139,10 @@ export function dispatch(m: Msg): void {
       store.resetForCapture(m.captureId ?? null, m.start ?? null, Array.isArray(m.ns) ? m.ns : []);
       setCapture(true, m);
       setup.onCaptureStart(m);
+      clearStreamStatus();
+      break;
+    case 'stream-status':
+      applyStreamStatus(m);
       break;
     case 'capture-state':   // not fanned out by the v2 relay; harmless if it arrives
       store.resetForCapture(m.captureId ?? null, m.start ?? null, Array.isArray(m.ns) ? m.ns : []);
@@ -165,6 +174,7 @@ export function dispatch(m: Msg): void {
     case 'cleared':
       store.clear();
       setCapture(false);
+      clearStreamStatus();
       break;
     case 'ns-added': {
       const arr: string[] = Array.isArray(m.ns) ? m.ns : [m.ns];
@@ -179,11 +189,12 @@ export function dispatch(m: Msg): void {
       toast(`${m.ns}: ${Array.isArray(m.workloads) && m.workloads.length ? m.workloads.length + ' workload(s)' : 'all pods'}`);
       break;
     case 'stream-end':
-      if (m.ns) { store.nsCapturing.delete(m.ns); capture.value = { ...capture.value, ns: capture.value.ns.filter(n => n !== m.ns) }; toast(`Stream ended: ${m.ns}`); }
+      if (m.ns) { store.nsCapturing.delete(m.ns); clearStreamStatus(m.ns); capture.value = { ...capture.value, ns: capture.value.ns.filter(n => n !== m.ns) }; toast(`Stream ended: ${m.ns}`); }
       break;
     case 'capture-stop': case 'capture-stopped': case 'capture-end': case 'capture-ended':
       setCapture(false, m);
       store.flushNow();
+      clearStreamStatus();
       if (m.n !== undefined) toast(`Captured ${m.n} lines`);
       break;
 

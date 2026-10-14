@@ -9,6 +9,7 @@ const W = require('../agent/lib/workloads');
 const { isNewerVersion } = require('../agent/lib/version');
 const C = require('../agent/lib/config');
 const A = require('../agent/lib/awsconfig');
+const { StreamHealth, failureReason } = require('../agent/lib/health');
 
 // ── validate ────────────────────────────────────────────────────────
 test('validate: namespaces are DNS labels', () => {
@@ -244,4 +245,48 @@ test('awsconfig: latestSsoExpiry picks the newest access-token blob', () => {
   ];
   assert.equal(A.latestSsoExpiry(blobs), Date.parse('2026-10-12T11:00:00Z'));
   assert.equal(A.latestSsoExpiry([]), null);
+});
+
+// ── health ──────────────────────────────────────────────────────────
+const WATCH = 'E1014 09:44:06.439055 99686 retrywatcher.go:129] "Watch failed" err="Get \\"https://4CA8.gr7.us-east-1.eks.amazonaws.com/api/v1/namespaces/monokee/pods?watch=true\\": proxyconnect tcp: dial tcp: lookup proxy.dmz.gemaltocloud.com: no such host"';
+
+test('health: failureReason drops the klog prefix and the request URL', () => {
+  assert.equal(failureReason(WATCH), 'proxyconnect tcp: dial tcp: lookup proxy.dmz.gemaltocloud.com: no such host');
+  assert.equal(failureReason('dial tcp 1.2.3.4:443: i/o timeout'), 'dial tcp 1.2.3.4:443: i/o timeout');
+  assert.equal(failureReason(''), '');
+});
+
+test('health: forwards one failure per minute, restarts at the limit with backoff, recovers on data', () => {
+  let t = 1_000_000;
+  const h = new StreamHealth({ failLimit: 3, windowMs: 10_000, baseDelayMs: 1000, maxDelayMs: 4000, forwardEveryMs: 60_000, now: () => t });
+  let r = h.failure('ns', 'boom');
+  assert.deepEqual([r.forward, r.restart, r.failures, r.degraded], [true, false, 1, false]);
+  t += 1000; r = h.failure('ns', 'boom');
+  assert.deepEqual([r.forward, r.restart, r.failures], [false, false, 2]);     // same minute: not forwarded again
+  t += 1000; r = h.failure('ns', 'boom');
+  assert.deepEqual([r.forward, r.restart, r.delayMs, r.restarts, r.degraded, r.since, r.reason], [false, true, 1000, 1, true, t, 'boom']);
+  // Still broken after the restart: next restart doubles the delay, then caps.
+  for (let i = 0; i < 3; i++) { t += 1000; r = h.failure('ns', 'boom'); }
+  assert.deepEqual([r.restart, r.delayMs, r.restarts], [true, 2000, 2]);
+  for (let i = 0; i < 3; i++) { t += 1000; r = h.failure('ns', 'boom'); }
+  assert.equal(r.delayMs, 4000);
+  for (let i = 0; i < 3; i++) { t += 1000; r = h.failure('ns', 'boom'); }
+  assert.deepEqual([r.delayMs, r.restarts], [4000, 4]);                        // capped
+  assert.equal(h.status('ns').degraded, true);
+  // Data flows: degraded period ends, backoff resets, other namespaces untouched.
+  assert.equal(h.healthy('ns'), true);
+  assert.equal(h.healthy('ns'), false);
+  assert.equal(h.healthy('other'), false);
+  assert.equal(h.status('ns').restarts, 0);
+  t += 61_000; r = h.failure('ns', 'again');
+  assert.deepEqual([r.forward, r.restart, r.failures], [true, false, 1]);     // a minute later: forwarded again
+});
+
+test('health: failures outside the window do not count', () => {
+  let t = 0;
+  const h = new StreamHealth({ failLimit: 3, windowMs: 5000, now: () => t });
+  h.failure('ns'); t += 6000; h.failure('ns'); t += 6000;
+  assert.equal(h.failure('ns').restart, false);
+  t += 100; assert.equal(h.failure('ns').restart, false);
+  t += 100; assert.equal(h.failure('ns').restart, true);
 });
