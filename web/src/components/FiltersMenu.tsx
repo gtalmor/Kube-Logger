@@ -72,7 +72,7 @@ export function FiltersMenu() {
         <TriList name="pod" title="Services" options={pods} filter={f.pod} />
         <TriList name="req" title="Requests" options={reqs} filter={f.req} />
         <div>
-          <TriList name="tenant" title="Tenants" options={tenants} filter={f.tenant} hint="domain_id of each line; lines without one inherit it from their request id. Names and colours: Setup → Tenants." />
+          <TriList name="tenant" title="Tenants" options={tenants} filter={f.tenant} hint="domain_id of each line; lines without one inherit it from their request id. Lines with no tenant at all are always shown. Names and colours: Setup → Tenants." />
           <AddInline placeholder="Tenant / domain id…" onAdd={v => addInclude('tenant', v)} />
         </div>
       </div>

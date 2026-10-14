@@ -138,7 +138,9 @@ export function compilePredicate(f: FilterState): Predicate {
       if (hideTrace && l.level === 'TRACE') return false;
       if (!triOk(pod, l.pod)) return false;
       if (!triOk(req, l.reqId)) return false;
-      if (!triOk(tenant, l.tenant)) return false;
+      // Lines we could not attribute to any tenant always pass: hiding them
+      // could hide the very event the user is looking for.
+      if (l.tenant !== undefined && !triOk(tenant, l.tenant)) return false;
       return matchesSearch(l);
     },
     continuation(l, hiddenReqIds) {

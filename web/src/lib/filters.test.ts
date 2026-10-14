@@ -117,11 +117,13 @@ describe('compilePredicate vs legacy oracle', () => {
 
 describe('tenant filter', () => {
   const lines = parseAll(sampleCapture(200));
-  it('include/exclude by tenant; lines without a tenant are hidden by include and kept by exclude', () => {
+  it('include/exclude by tenant; lines without a tenant always pass', () => {
     const inc = compilePredicate({ ...emptyFilters(), tenant: { health: 'include' } });
     const ids = recomputeView(lines, inc, new Set());
     expect(ids.length).toBeGreaterThan(0);
-    expect(ids.every(id => lines[id].tenant === 'health')).toBe(true);
+    expect(ids.every(id => lines[id].tenant === 'health' || lines[id].tenant === undefined)).toBe(true);
+    expect(ids.some(id => lines[id].tenant === 'health')).toBe(true);
+    expect(ids.some(id => lines[id].kind === 'http')).toBe(true);   // untagged gateway lines stay visible
     expect(inc.usesTenant).toBe(true);
     const exc = compilePredicate({ ...emptyFilters(), tenant: { health: 'exclude' } });
     const ids2 = recomputeView(lines, exc, new Set());

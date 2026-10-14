@@ -138,18 +138,20 @@ describe('tenant attribution', () => {
     expect(d.tenant).toBeUndefined();
     expect(s.tenantCounts.get(TA)).toBe(3);
     s.setPredicate(compilePredicate({ ...emptyFilters(), tenant: { [TA]: 'include' } }), []);
-    expect(s.ids).toEqual([a.id, b.id, c.id]);
+    expect(s.ids).toEqual([a.id, b.id, c.id, d.id]);   // d has no tenant → always shown
     s.setPredicate(compilePredicate({ ...emptyFilters(), tenant: { [TA]: 'exclude' } }), []);
     expect(s.ids).toEqual([d.id]);
   });
   it('re-evaluates the view when attribution arrives after a tenant filter is active', () => {
     const s = mk(1000);
     s.setPredicate(compilePredicate({ ...emptyFilters(), tenant: { [TA]: 'include' } }), []);
-    s.ingest([{ i: 0, ns: 'ns', line: jsonLine({ ts: 1, reqId: 'R', msg: 'early' }) }]);
+    const TB = 'other-tenant';
+    s.setPredicate(compilePredicate({ ...emptyFilters(), tenant: { [TB]: 'include' } }), []);
+    s.ingest([{ i: 0, ns: 'ns', line: jsonLine({ ts: 1, reqId: 'R', msg: 'early, unattributed → shown' }) }]);
+    expect(s.ids).toEqual([0]);
+    s.ingest([{ i: 1, ns: 'ns', line: jsonLine({ ts: 2, reqId: 'R', domain: TA, msg: 'now known to be TA → both hidden' }) }]);
     expect(s.ids).toEqual([]);
-    s.ingest([{ i: 1, ns: 'ns', line: jsonLine({ ts: 2, reqId: 'R', domain: TA, msg: 'tenant known now' }) }]);
-    expect(s.ids).toEqual([0, 1]);
-    expect(s.counts.total).toBe(2);
+    expect(s.counts.total).toBe(0);
   });
   it('eviction keeps tenant counts consistent', () => {
     const s = mk(120);
