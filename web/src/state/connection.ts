@@ -41,6 +41,7 @@ function wsUrl(): string {
 /** Bare domain visit → bounce to the last session so the domain is a valid bookmark. */
 export function maybeRedirectToLastSession(): boolean {
   if (sessionId) { saveLastSession(sessionId); return false; }
+  if (new URLSearchParams(location.search).has('demo')) return false;
   const last = loadLastSession();
   if (!last) return false;
   location.replace(`?session=${last}`);

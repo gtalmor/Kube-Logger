@@ -6,8 +6,8 @@ import { parseLine, type LogLine } from './parse';
 const POD_ENGINE = 'io-flow-engine-7d9f8c6b5-x1k2q';
 const POD_GW = 'io-gateway-5c4d3b2a1-p0z9';
 
-export function jsonLine(opts: { ts: number; level?: string; reqId?: string; msg: string; pod?: string; container?: string; extra?: Record<string, unknown> }): string {
-  const j = { timestamp: new Date(opts.ts).toISOString(), level: opts.level || 'info', req_id: opts.reqId, data: [opts.msg], ...(opts.extra || {}) };
+export function jsonLine(opts: { ts: number; level?: string; reqId?: string; domain?: string; msg: string; pod?: string; container?: string; extra?: Record<string, unknown> }): string {
+  const j = { timestamp: new Date(opts.ts).toISOString(), level: opts.level || 'info', req_id: opts.reqId, domain_id: opts.domain, data: [opts.msg], ...(opts.extra || {}) };
   return `${opts.pod || POD_ENGINE} ${opts.container || 'flow-engine'} ${JSON.stringify(j)}`;
 }
 export function httpLine(opts: { ts: number; method?: string; path: string; status?: number; size?: number; pod?: string }): string {
@@ -22,19 +22,19 @@ export const nodeMsg = (exec: string, flow: string, node: string, state: string,
 export const startMsg = (exec: string, flow: string) => `[${exec}] ${flow} - Starting flow execution`;
 export const failMsg = (exec: string, flow: string, node: string, reason: string) => `[${exec}] ${flow} - Failure from node ${node} (${reason})`;
 
-export interface FlowScript { exec: string; flow: string; reqId: string; t0: number; nodes: { node: string; dur: number; next?: string; fail?: string; gapBefore?: number }[] }
+export interface FlowScript { exec: string; flow: string; reqId: string; domain?: string; t0: number; nodes: { node: string; dur: number; next?: string; fail?: string; gapBefore?: number }[] }
 
 /** Build the raw lines for one flow execution: start, then pre/done per node. */
 export function flowLines(s: FlowScript): string[] {
   const out: string[] = [];
   let t = s.t0;
-  out.push(jsonLine({ ts: t, reqId: s.reqId, msg: startMsg(s.exec, s.flow) }));
+  out.push(jsonLine({ ts: t, reqId: s.reqId, domain: s.domain, msg: startMsg(s.exec, s.flow) }));
   for (const n of s.nodes) {
     t += n.gapBefore || 5;
-    out.push(jsonLine({ ts: t, reqId: s.reqId, msg: nodeMsg(s.exec, s.flow, n.node, 'process') }));
+    out.push(jsonLine({ ts: t, reqId: s.reqId, domain: s.domain, msg: nodeMsg(s.exec, s.flow, n.node, 'process') }));
     t += n.dur;
-    if (n.fail) out.push(jsonLine({ ts: t, reqId: s.reqId, level: 'error', msg: failMsg(s.exec, s.flow, n.node, n.fail) }));
-    else out.push(jsonLine({ ts: t, reqId: s.reqId, msg: nodeMsg(s.exec, s.flow, n.node, 'done', n.next) }));
+    if (n.fail) out.push(jsonLine({ ts: t, reqId: s.reqId, domain: s.domain, level: 'error', msg: failMsg(s.exec, s.flow, n.node, n.fail) }));
+    else out.push(jsonLine({ ts: t, reqId: s.reqId, domain: s.domain, msg: nodeMsg(s.exec, s.flow, n.node, 'done', n.next) }));
   }
   return out;
 }
@@ -49,21 +49,23 @@ export function parseAll(raws: string[], ns = 'ns'): LogLine[] {
 export function sampleCapture(n = 200, t0 = Date.UTC(2026, 9, 12, 10, 0, 0)): string[] {
   const out: string[] = [];
   const nodes = ['script_be_v2', 'http_request', 'condition', 'JS Executer', 'set_var'];
+  const tenants = ['a5ad1f2e-7c3b-4d1e-9f00-0123456789ab', '714a9c0d-2e5f-4b6a-8c7d-fedcba987672', '64f6e5d4-c3b2-4a19-8877-66554433224d'];
   let t = t0;
   let k = 0;
   while (out.length < n) {
     const exec = `exec-${k}`;
     const req = `req-${String(1000 + k).padStart(4, '0')}-ab12cd34`;
     out.push(httpLine({ ts: t, path: '/flow/execute/my-login-flow', status: k % 7 === 6 ? 502 : 200, size: 300 + k }));
-    const script: FlowScript = { exec, flow: 'my-login-flow', reqId: req, t0: t, nodes: [] };
+    const tenant = tenants[k % tenants.length];
+    const script: FlowScript = { exec, flow: 'my-login-flow', reqId: req, domain: tenant, t0: t, nodes: [] };
     for (let i = 0; i < 4; i++) {
       const node = nodes[(k + i) % nodes.length];
       script.nodes.push({ node, dur: 20 + ((k * 37 + i * 91) % 600), next: `#${9000 + i}`, fail: (k % 7 === 6 && i === 3) ? 'AxiosError: Request failed with status code 502' : undefined });
     }
     out.push(...flowLines(script));
-    out.push(jsonLine({ ts: t + 2, level: 'debug', reqId: req, msg: 'MongoDBSessionRepository count started' }));
-    out.push(jsonLine({ ts: t + 40, level: 'debug', reqId: req, msg: 'MongoDBSessionRepository count finished' }));
-    out.push(jsonLine({ ts: t + 50, level: 'trace', reqId: req, msg: 'Health "liveness" probe request received' }));
+    out.push(jsonLine({ ts: t + 2, level: 'debug', reqId: req, domain: tenant, msg: 'MongoDBSessionRepository count started' }));
+    out.push(jsonLine({ ts: t + 40, level: 'debug', reqId: req, domain: tenant, msg: 'MongoDBSessionRepository count finished' }));
+    out.push(jsonLine({ ts: t + 50, level: 'trace', reqId: `health-${k}`, domain: 'health', msg: 'Health "liveness" probe request received' }));
     if (k % 5 === 4) {
       out.push(`${POD_ENGINE} flow-engine \x1b[31mSomething went wrong in script\x1b[0m`);
       out.push(`${POD_ENGINE} flow-engine     SyntaxError: Illegal return statement`);

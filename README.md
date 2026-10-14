@@ -96,7 +96,9 @@ The header shows **Agent connected** when the relay sees your agent. Click **⚙
 2. Namespaces load automatically once you are authenticated. Tick the ones to capture; expand a namespace to narrow it to specific workloads (live-editable during a capture).
 3. **Start capture**. Next time, the welcome screen offers **Resume last capture** with the same selection.
 
-While capturing: search (regex, `/`), **Filters ▾** (levels, services, request ids, hidden patterns, highlights, presets), **View ▾** (follow, wrap, light/dark theme, level colours, buffer size, export, open file). Click a request id for its trace (waterfall, root cause, flow path), `{ }` on a line for the JSON inspector, `n`/`p` to step through errors. The bottom bar shows counts, namespace colours and buffer usage.
+While capturing: search (regex, `/`), **Filters ▾** (levels, services, request ids, tenants, hidden patterns, highlights, presets), **View ▾** (follow, wrap, light/dark theme, level colours, buffer size, export, open file). Click a request id for its trace (waterfall, root cause, flow path), `{ }` on a line for the JSON inspector, `n`/`p` to step through errors. The bottom bar shows counts, namespace colours and buffer usage.
+
+**Multi-tenant clusters.** Each structured line's `domain_id` is shown as a tenant tag on the row; lines without one (stack traces, script-executor output) inherit the tenant of their request id. The **Tenants** list in Filters ▾ shows every tenant seen with line counts, plus a box to enter an id that hasn't appeared yet. Nothing is filtered until you include or exclude one; excluding `health` is a quick way to drop probe traffic, and a preset can save a per-tenant view.
 
 The viewer keeps the newest 50k lines in memory by default (configurable in **View ▾**). The agent keeps the newest 20k lines and the relay replays them to a viewer that opens later, so a reload or a reconnect does not lose context.
 

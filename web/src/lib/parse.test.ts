@@ -48,6 +48,10 @@ describe('parseLine', () => {
     expect(JSON.parse(l.raw.slice(l.jsonOff!)).req_id).toBe('req-1');
     expect(l.hasJsonHint).toBe(true);
     expect(l.isErr).toBe(false);
+    expect(l.tenant).toBeUndefined();
+    const t = p(jsonLine({ ts, reqId: 'r', domain: 'a5ad1f2e-7c3b-4d1e-9f00-0123456789ab', msg: 'x' }))!;
+    expect(t.tenant).toBe('a5ad1f2e-7c3b-4d1e-9f00-0123456789ab');
+    expect(p(jsonLine({ ts, msg: 'x', extra: { domainId: 'camel' } }))!.tenant).toBe('camel');
   });
 
   it('parses failures, axios errors and not-connected outputs', () => {
@@ -101,6 +105,8 @@ describe('parseLine', () => {
     expect(se.reqId).toBe('req-se-1');
     expect(se.level).toBe('ERROR');
     expect(se.ts).toBe(Date.parse('2026-10-12T10:00:00.000'));
+    expect(se.tenant).toBe('domain');
+    expect(p('io-script-executor-1 se [2026-10-12T10:00:00.000] [INFO] [req-se-2] [] [caller] - x')!.tenant).toBeUndefined();
 
     const det = p('io-flow-engine-abc flow-engine     SyntaxError: Illegal return statement')!;
     expect(det.kind).toBe('plain');

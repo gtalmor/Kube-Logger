@@ -75,19 +75,20 @@ export function saveHiddenPatterns(v: string[]): void { setJson(KEYS.hiddenPatte
 export function loadHighlights(): string[] { const v = getJson<unknown>(KEYS.highlights, []); return Array.isArray(v) ? v.filter(x => typeof x === 'string') : []; }
 export function saveHighlights(v: string[]): void { setJson(KEYS.highlights, v); }
 
-export interface PresetStore { current: string; presets: Record<string, Partial<FilterState> & { level?: unknown; pod?: unknown; req?: unknown }> }
+export interface PresetStore { current: string; presets: Record<string, Partial<FilterState> & { level?: unknown; pod?: unknown; req?: unknown; tenant?: unknown }> }
 export function loadPresets(): PresetStore {
   const j = getJson<Partial<PresetStore>>(KEYS.presets, {});
   return { current: typeof j.current === 'string' ? j.current : '', presets: (j.presets && typeof j.presets === 'object') ? j.presets : {} };
 }
 export function savePresets(p: PresetStore): void { setJson(KEYS.presets, p); }
 /** Normalize a stored preset (any vintage) into a full FilterState. */
-export function presetToFilters(p: Partial<FilterState> & { level?: unknown; pod?: unknown; req?: unknown }): FilterState {
+export function presetToFilters(p: Partial<FilterState> & { level?: unknown; pod?: unknown; req?: unknown; tenant?: unknown }): FilterState {
   return {
     search: typeof p.search === 'string' ? p.search : '',
     level: migrateFilterField(p.level) as TriFilter,
     pod: migrateFilterField(p.pod) as TriFilter,
     req: migrateFilterField(p.req) as TriFilter,
+    tenant: migrateFilterField(p.tenant) as TriFilter,
     hideTrace: !!p.hideTrace,
     hiddenPatterns: Array.isArray(p.hiddenPatterns) ? [...p.hiddenPatterns] : [],
     hiddenExecIds: Array.isArray(p.hiddenExecIds) ? [...p.hiddenExecIds] : [],

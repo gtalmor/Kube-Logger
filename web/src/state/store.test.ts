@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { LogStore } from './store';
 import { compilePredicate, emptyFilters, recomputeView } from '../lib/filters';
-import { parseAll, sampleCapture } from '../lib/testutil';
+import { jsonLine, parseAll, sampleCapture } from '../lib/testutil';
 import type { LogLine } from '../lib/parse';
 
 const pred = compilePredicate(emptyFilters());
@@ -118,5 +118,46 @@ describe('LogStore', () => {
     expect(s.locate(-5)).toBe('evicted');
     expect(s.locate(s.ids[0])).toBe('ok');
     expect(s.viewIndexOf(s.ids[3])).toBe(3);
+  });
+});
+
+describe('tenant attribution', () => {
+  const TA = 'a5ad1f2e-7c3b-4d1e-9f00-0123456789ab';
+  it('inherits the tenant of a request id, forwards and backwards, with counts', () => {
+    const s = mk(1000);
+    s.ingest([
+      { i: 0, ns: 'ns', line: jsonLine({ ts: 1, reqId: 'R', msg: 'no tenant yet' }) },
+      { i: 1, ns: 'ns', line: jsonLine({ ts: 2, reqId: 'R', domain: TA, msg: 'has tenant' }) },
+      { i: 2, ns: 'ns', line: jsonLine({ ts: 3, reqId: 'R', msg: 'later line' }) },
+      { i: 3, ns: 'ns', line: jsonLine({ ts: 4, reqId: 'Q', msg: 'other request' }) },
+    ]);
+    const [a, b, c, d] = s.lines();
+    expect(a.tenant).toBe(TA); expect(a.tenantAttributed).toBe(true);
+    expect(b.tenant).toBe(TA); expect(b.tenantAttributed).toBeUndefined();
+    expect(c.tenant).toBe(TA); expect(c.tenantAttributed).toBe(true);
+    expect(d.tenant).toBeUndefined();
+    expect(s.tenantCounts.get(TA)).toBe(3);
+    s.setPredicate(compilePredicate({ ...emptyFilters(), tenant: { [TA]: 'include' } }), []);
+    expect(s.ids).toEqual([a.id, b.id, c.id]);
+    s.setPredicate(compilePredicate({ ...emptyFilters(), tenant: { [TA]: 'exclude' } }), []);
+    expect(s.ids).toEqual([d.id]);
+  });
+  it('re-evaluates the view when attribution arrives after a tenant filter is active', () => {
+    const s = mk(1000);
+    s.setPredicate(compilePredicate({ ...emptyFilters(), tenant: { [TA]: 'include' } }), []);
+    s.ingest([{ i: 0, ns: 'ns', line: jsonLine({ ts: 1, reqId: 'R', msg: 'early' }) }]);
+    expect(s.ids).toEqual([]);
+    s.ingest([{ i: 1, ns: 'ns', line: jsonLine({ ts: 2, reqId: 'R', domain: TA, msg: 'tenant known now' }) }]);
+    expect(s.ids).toEqual([0, 1]);
+    expect(s.counts.total).toBe(2);
+  });
+  it('eviction keeps tenant counts consistent', () => {
+    const s = mk(120);
+    const raws = sampleCapture(500);
+    s.ingest(raws.map((line, j) => ({ i: j, ns: 'ns', line })));
+    const brute = new Map<string, number>();
+    for (const l of s.lines()) if (l.tenant) brute.set(l.tenant, (brute.get(l.tenant) || 0) + 1);
+    expect([...s.tenantCounts.entries()].sort()).toEqual([...brute.entries()].sort());
+    expect(s.tenantCounts.has('health')).toBe(true);
   });
 });

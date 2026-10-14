@@ -25,6 +25,10 @@ export interface LogLine {
   level: string;
   msg?: string;
   reqId?: string;
+  /** Tenant / domain id (json `domain_id`, script-executor bracket). */
+  tenant?: string;
+  /** True when the tenant was inherited from another line with the same request id. */
+  tenantAttributed?: boolean;
   /** kind === 'json': offset in `raw` where the JSON object starts. */
   jsonOff?: number;
   // http access log
@@ -160,6 +164,7 @@ export function parseLine(raw: string, ns: string | undefined, nsCapturing: Read
         ts, tsText: ts === undefined && typeof j.timestamp === 'string' ? j.timestamp : undefined,
         level: normalizeLevel(typeof j.level === 'string' ? j.level : 'INFO'),
         reqId: typeof j.req_id === 'string' ? j.req_id : undefined,
+        tenant: (typeof j.domain_id === 'string' && j.domain_id) || (typeof j.domainId === 'string' && j.domainId) || undefined,
         msg, jsonOff: t.length - jm[3].length,
       };
       const fn = FLOW_NODE_RE.exec(msg);
@@ -197,7 +202,7 @@ export function parseLine(raw: string, ns: string | undefined, nsCapturing: Read
       return finish({
         id, src, kind: 'script-error', raw: t, ns, pod: tp[1], container: tp[2],
         ts, tsText: ts === undefined ? se[1] : undefined,
-        level: normalizeLevel(se[2]), reqId: se[3], msg: cleanMsg,
+        level: normalizeLevel(se[2]), reqId: se[3], tenant: se[4] || undefined, msg: cleanMsg,
       });
     }
     const ed = ERR_DETAIL_RE.exec(cleanMsg);

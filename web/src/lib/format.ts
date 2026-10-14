@@ -59,3 +59,9 @@ export function fmtCount(n: number): string {
 export function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+/** UUID-ish tenant ids are shortened to their first 8 chars; names stay as-is. */
+export function shortTenant(t: string | undefined): string {
+  if (!t) return '';
+  return /^[0-9a-f]{8}-/i.test(t) || t.length > 16 ? t.slice(0, 8) : t;
+}

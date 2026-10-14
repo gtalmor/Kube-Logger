@@ -1,6 +1,7 @@
 // Filter state (search, tri-state maps, hidden patterns/execs, highlights)
 // and presets. The store subscribes to `filters` and recomputes its view.
 import { computed, signal } from '@preact/signals';
+export type TriName = 'level' | 'pod' | 'req' | 'tenant';
 import { activeConstraintCount, compilePredicate, emptyFilters, triCycle, type FilterState, type TriFilter } from '../lib/filters';
 import { compileHighlights } from '../lib/highlight';
 import { loadHiddenPatterns, loadHighlights, loadPresets, presetToFilters, saveHiddenPatterns, saveHighlights, savePresets, type PresetStore } from '../lib/storage';
@@ -21,10 +22,12 @@ function update(patch: Partial<FilterState>): void {
 
 export const setSearch = (search: string) => update({ search });
 export const setHideTrace = (hideTrace: boolean) => update({ hideTrace });
-export const cycleTri = (name: 'level' | 'pod' | 'req', value: string) => update({ [name]: triCycle(filters.value[name], value) } as Partial<FilterState>);
-export const clearTri = (name: 'level' | 'pod' | 'req') => update({ [name]: {} } as Partial<FilterState>);
-export const setTri = (name: 'level' | 'pod' | 'req', tri: TriFilter) => update({ [name]: tri } as Partial<FilterState>);
-export const includeOnly = (name: 'level' | 'pod' | 'req', value: string) => update({ [name]: { [value]: 'include' } } as Partial<FilterState>);
+export const cycleTri = (name: TriName, value: string) => update({ [name]: triCycle(filters.value[name], value) } as Partial<FilterState>);
+export const clearTri = (name: TriName) => update({ [name]: {} } as Partial<FilterState>);
+export const setTri = (name: TriName, tri: TriFilter) => update({ [name]: tri } as Partial<FilterState>);
+export const includeOnly = (name: TriName, value: string) => update({ [name]: { [value]: 'include' } } as Partial<FilterState>);
+/** Add one include entry without touching the others (manual tenant ids). */
+export const addInclude = (name: TriName, value: string) => update({ [name]: { ...filters.value[name], [value]: 'include' } } as Partial<FilterState>);
 
 export function addHiddenPattern(p: string): void {
   if (!p || filters.value.hiddenPatterns.includes(p)) return;
@@ -49,13 +52,13 @@ export const clearHighlights = () => update({ highlights: [] });
 
 /** Clear search, tri-state and trace filters; keep hidden/highlights (legacy Reset). */
 export function resetFilters(): void {
-  update({ search: '', level: {}, pod: {}, req: {}, hideTrace: false });
+  update({ search: '', level: {}, pod: {}, req: {}, tenant: {}, hideTrace: false });
 }
 /** Clear everything that hides lines, so context around a line is visible. */
 export function clearAllHiding(): boolean {
   const f = filters.value;
-  const had = !!f.search || Object.keys(f.level).length > 0 || Object.keys(f.pod).length > 0 || Object.keys(f.req).length > 0 || f.hideTrace;
-  if (had) update({ search: '', level: {}, pod: {}, req: {}, hideTrace: false });
+  const had = !!f.search || Object.keys(f.level).length > 0 || Object.keys(f.pod).length > 0 || Object.keys(f.req).length > 0 || Object.keys(f.tenant).length > 0 || f.hideTrace;
+  if (had) update({ search: '', level: {}, pod: {}, req: {}, tenant: {}, hideTrace: false });
   return had;
 }
 

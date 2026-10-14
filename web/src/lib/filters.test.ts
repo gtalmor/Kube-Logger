@@ -115,6 +115,22 @@ describe('compilePredicate vs legacy oracle', () => {
   }
 });
 
+describe('tenant filter', () => {
+  const lines = parseAll(sampleCapture(200));
+  it('include/exclude by tenant; lines without a tenant are hidden by include and kept by exclude', () => {
+    const inc = compilePredicate({ ...emptyFilters(), tenant: { health: 'include' } });
+    const ids = recomputeView(lines, inc, new Set());
+    expect(ids.length).toBeGreaterThan(0);
+    expect(ids.every(id => lines[id].tenant === 'health')).toBe(true);
+    expect(inc.usesTenant).toBe(true);
+    const exc = compilePredicate({ ...emptyFilters(), tenant: { health: 'exclude' } });
+    const ids2 = recomputeView(lines, exc, new Set());
+    expect(ids2.some(id => lines[id].tenant === 'health')).toBe(false);
+    expect(ids2.some(id => lines[id].kind === 'http')).toBe(true);
+    expect(compilePredicate(emptyFilters()).usesTenant).toBe(false);
+  });
+});
+
 describe('extractPattern', () => {
   const mk = (msg: string) => parseAll([jsonLine({ ts: 1, msg })])[0];
   it('recognizes probes, db queries, node states, warnings, fallback', () => {

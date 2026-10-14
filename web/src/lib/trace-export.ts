@@ -39,7 +39,7 @@ function enrichBar(src: LineSource, flow: FlowIndex, bar: Bar, minStart: number,
 function lineOut(l: LogLine) {
   return {
     idx: l.id, ts: l.ts !== undefined ? new Date(l.ts).toISOString() : l.tsText, ns: l.ns, pod: l.pod, container: l.container,
-    level: l.level, type: l.kind, msg: l.msg, reqId: l.reqId,
+    level: l.level, type: l.kind, msg: l.msg, reqId: l.reqId, tenant: l.tenant,
     flowExecId: l.flowExecId, flowName: l.flowName, flowNode: l.flowNode,
     flowState: l.flowState, flowNext: l.flowNext, flowFailReason: l.flowFailReason,
     failNodeId: l.failNodeId, failNodeLabel: l.failNodeLabel,

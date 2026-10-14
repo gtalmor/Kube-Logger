@@ -38,6 +38,10 @@ export class LogStore implements LineSource {
   readonly podCounts = new Map<string, number>();
   readonly nsCounts = new Map<string, number>();
   readonly reqCounts = new Map<string, number>();
+  readonly tenantCounts = new Map<string, number>();
+  /** reqId → tenant, learned from tenant-bearing lines; used to attribute the rest of a request. */
+  private reqTenant = new Map<string, string>();
+  private needRecompute = false;
   readonly nsSeen = new Set<string>();
   nsCapturing = new Set<string>();
   // view
@@ -110,6 +114,9 @@ export class LogStore implements LineSource {
     if (viewFront) { this.ids.splice(0, viewFront); this.viewEvicted += viewFront; }
     if (errFront) this.errIds.splice(0, errFront);
     if (this.ring.evicted) this.flow.evictBefore(this.ring.firstId);
+    // A tenant learned late changed earlier lines' attribution: re-evaluate
+    // the view if a tenant filter is active.
+    if (this.needRecompute) { this.needRecompute = false; if (this.pred.usesTenant) { this.recompute(); return added; } }
     if (added) this.scheduleFlush();
     return added;
   }
@@ -122,7 +129,21 @@ export class LogStore implements LineSource {
       let a = this.reqIdx.get(l.reqId);
       if (!a) this.reqIdx.set(l.reqId, a = []);
       a.push(l.id);
+      // Request-id tenant attribution, both directions.
+      if (l.tenant && !l.tenantAttributed) {
+        if (!this.reqTenant.has(l.reqId)) {
+          this.reqTenant.set(l.reqId, l.tenant);
+          for (const id of a) {
+            const o = this.ring.get(id);
+            if (o && o !== l && !o.tenant) { o.tenant = l.tenant; o.tenantAttributed = true; inc(this.tenantCounts, l.tenant); this.needRecompute = true; }
+          }
+        }
+      } else if (!l.tenant) {
+        const t = this.reqTenant.get(l.reqId);
+        if (t) { l.tenant = t; l.tenantAttributed = true; }
+      }
     }
+    if (l.tenant) inc(this.tenantCounts, l.tenant);
     if (l.flowExecId) {
       let a = this.execIdx.get(l.flowExecId);
       if (!a) { this.execIdx.set(l.flowExecId, a = []); this.execOrder.push(l.flowExecId); }
@@ -136,8 +157,10 @@ export class LogStore implements LineSource {
   private unindex(l: LogLine): void {
     if (l.ns) dec(this.nsCounts, l.ns);
     if (l.pod) dec(this.podCounts, l.pod);
+    if (l.tenant) dec(this.tenantCounts, l.tenant);
     if (l.reqId) {
       dec(this.reqCounts, l.reqId);
+      if (!this.reqCounts.has(l.reqId)) this.reqTenant.delete(l.reqId);
       const a = this.reqIdx.get(l.reqId);
       if (a) { if (a[0] === l.id) a.shift(); if (!a.length) this.reqIdx.delete(l.reqId); }
     }
@@ -194,7 +217,7 @@ export class LogStore implements LineSource {
     this.ring.reset();
     this.flow.clear();
     this.reqIdx.clear(); this.execIdx.clear(); this.execOrder = []; this.https = [];
-    this.podCounts.clear(); this.nsCounts.clear(); this.reqCounts.clear(); this.nsSeen.clear();
+    this.podCounts.clear(); this.nsCounts.clear(); this.reqCounts.clear(); this.tenantCounts.clear(); this.reqTenant.clear(); this.nsSeen.clear();
     this.ids = []; this.errIds = []; this.counts = { total: 0, err: 0, warn: 0, dbg: 0, trc: 0, http: 0 };
     this.hiddenReqIds.clear();
     this.lastSrc = -1;

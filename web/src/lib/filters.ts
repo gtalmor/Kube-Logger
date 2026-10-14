@@ -12,6 +12,7 @@ export interface FilterState {
   level: TriFilter;
   pod: TriFilter;
   req: TriFilter;
+  tenant: TriFilter;
   hideTrace: boolean;
   hiddenPatterns: string[];
   hiddenExecIds: string[];
@@ -19,7 +20,7 @@ export interface FilterState {
 }
 
 export function emptyFilters(): FilterState {
-  return { search: '', level: {}, pod: {}, req: {}, hideTrace: false, hiddenPatterns: [], hiddenExecIds: [], highlights: [] };
+  return { search: '', level: {}, pod: {}, req: {}, tenant: {}, hideTrace: false, hiddenPatterns: [], hiddenExecIds: [], highlights: [] };
 }
 
 // ── tri-state helpers ───────────────────────────────────────────────
@@ -63,7 +64,7 @@ export function migrateFilterField(v: unknown): TriFilter {
 }
 export function activeConstraintCount(f: FilterState): number {
   return (f.search ? 1 : 0) + (f.hideTrace ? 1 : 0)
-    + Object.keys(f.level).length + Object.keys(f.pod).length + Object.keys(f.req).length
+    + Object.keys(f.level).length + Object.keys(f.pod).length + Object.keys(f.req).length + Object.keys(f.tenant || {}).length
     + f.hiddenPatterns.length + f.hiddenExecIds.length;
 }
 
@@ -97,10 +98,12 @@ export interface Predicate {
   continuation(l: LogLine, hiddenReqIds: ReadonlySet<string>): boolean;
   readonly search: SearchMatcher;
   readonly hasSearch: boolean;
+  /** True when a tenant constraint is active (the store re-evaluates after late attribution). */
+  readonly usesTenant: boolean;
 }
 
 export function compilePredicate(f: FilterState): Predicate {
-  const level = compileTri(f.level), pod = compileTri(f.pod), req = compileTri(f.req);
+  const level = compileTri(f.level), pod = compileTri(f.pod), req = compileTri(f.req), tenant = compileTri(f.tenant || {});
   const hidden = f.hiddenPatterns.map(p => p.toLowerCase()).filter(Boolean);
   const hiddenExecs = new Set(f.hiddenExecIds);
   const search = compileSearch(f.search);
@@ -127,6 +130,7 @@ export function compilePredicate(f: FilterState): Predicate {
   return {
     search,
     hasSearch: !!search.lower,
+    usesTenant: tenant.mode !== 'none',
     full(l, hiddenReqIds) {
       if (hiddenByPattern(l)) return false;
       if (hiddenByExec(l, hiddenReqIds)) return false;
@@ -134,6 +138,7 @@ export function compilePredicate(f: FilterState): Predicate {
       if (hideTrace && l.level === 'TRACE') return false;
       if (!triOk(pod, l.pod)) return false;
       if (!triOk(req, l.reqId)) return false;
+      if (!triOk(tenant, l.tenant)) return false;
       return matchesSearch(l);
     },
     continuation(l, hiddenReqIds) {

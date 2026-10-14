@@ -82,7 +82,7 @@ export function Header() {
       <button ref={fRef} class={`btn ${n ? 'active' : ''} ${menu === 'filters' ? 'open' : ''}`} onClick={() => { openMenu.value = menu === 'filters' ? null : 'filters'; }}>
         Filters {n ? <span class="badge">{n}</span> : null} <span class="chev">▾</span>
       </button>
-      <Popover open={menu === 'filters'} anchor={fRef} onClose={() => { if (openMenu.value === 'filters') openMenu.value = null; }} align="right" width={640}>
+      <Popover open={menu === 'filters'} anchor={fRef} onClose={() => { if (openMenu.value === 'filters') openMenu.value = null; }} align="right" width={760}>
         <FiltersMenu />
       </Popover>
       <button ref={vRef} class={`btn ${menu === 'view' ? 'open' : ''}`} onClick={() => { openMenu.value = menu === 'view' ? null : 'view'; }}>View <span class="chev">▾</span></button>
