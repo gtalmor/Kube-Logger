@@ -7,11 +7,12 @@ import {
 import { addInclude } from '../state/filters';
 import { triHasAny, type TriFilter } from '../lib/filters';
 import { shortPod, shortReq, shortTenant, fmtCount } from '../lib/format';
+import { displayTenant, knownTenants, tenantColor, tenantMeta } from '../state/tenants';
 import { toast } from '../state/toasts';
 
 const LEVELS = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE', 'HTTP'];
 
-function TriList({ name, title, options, filter, hint }: { name: 'level' | 'pod' | 'req' | 'tenant'; title: string; options: { value: string; label: string; count?: number }[]; filter: TriFilter; hint?: string }) {
+function TriList({ name, title, options, filter, hint }: { name: 'level' | 'pod' | 'req' | 'tenant'; title: string; options: { value: string; label: string; count?: number; color?: string }[]; filter: TriFilter; hint?: string }) {
   const [q, setQ] = useState('');
   const shown = q ? options.filter(o => o.label.toLowerCase().includes(q.toLowerCase()) || o.value.toLowerCase().includes(q.toLowerCase())) : options;
   return (
@@ -26,6 +27,7 @@ function TriList({ name, title, options, filter, hint }: { name: 'level' | 'pod'
           return (
             <div key={o.value} class="pop-row" title={`${o.value}\nclick: include → exclude → clear`} onClick={() => cycleTri(name, o.value)}>
               <span class={`tri ${st === 'include' ? 'inc' : st === 'exclude' ? 'exc' : ''}`}>{st === 'include' ? '+' : st === 'exclude' ? '−' : '·'}</span>
+              {o.color && <span class="sw" style={{ background: o.color }} />}
               <span class="grow truncate">{o.label}</span>
               {o.count !== undefined && <span class="count">{fmtCount(o.count)}</span>}
             </div>
@@ -53,10 +55,12 @@ export function FiltersMenu() {
   const pods = [...store.podCounts.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([p, c]) => ({ value: p, label: shortPod(p), count: c }));
   const reqs = [...store.reqCounts.entries()].sort((a, b) => b[1] - a[1]).map(([r, c]) => ({ value: r, label: shortReq(r), count: c }));
   // Tenants seen in the logs plus any ids entered by hand (kept even when unseen).
+  void tenantMeta.value;
   const tenantSeen = new Set(store.tenantCounts.keys());
   const tenants = [
-    ...[...store.tenantCounts.entries()].sort((a, b) => b[1] - a[1]).map(([t, c]) => ({ value: t, label: shortTenant(t), count: c })),
-    ...Object.keys(f.tenant).filter(t => !tenantSeen.has(t)).map(t => ({ value: t, label: shortTenant(t) + ' (not seen)', count: 0 })),
+    ...[...store.tenantCounts.entries()].sort((a, b) => b[1] - a[1]).map(([t, c]) => ({ value: t, label: displayTenant(t), count: c, color: tenantColor(t) })),
+    ...knownTenants([]).filter(t => !tenantSeen.has(t) && !f.tenant[t]).map(t => ({ value: t, label: displayTenant(t) + ' (not seen)', count: 0, color: tenantColor(t) })),
+    ...Object.keys(f.tenant).filter(t => !tenantSeen.has(t) && !tenantMeta.value[t]).map(t => ({ value: t, label: shortTenant(t) + ' (not seen)', count: 0 })),
   ];
   const execNames = (id: string) => store.flow.execs.get(id)?.name || id.slice(0, 8);
   const ps = presets.value;
@@ -68,7 +72,7 @@ export function FiltersMenu() {
         <TriList name="pod" title="Services" options={pods} filter={f.pod} />
         <TriList name="req" title="Requests" options={reqs} filter={f.req} />
         <div>
-          <TriList name="tenant" title="Tenants" options={tenants} filter={f.tenant} hint="domain_id of each line; lines without one inherit it from their request id" />
+          <TriList name="tenant" title="Tenants" options={tenants} filter={f.tenant} hint="domain_id of each line; lines without one inherit it from their request id. Names and colours: Setup → Tenants." />
           <AddInline placeholder="Tenant / domain id…" onAdd={v => addInclude('tenant', v)} />
         </div>
       </div>

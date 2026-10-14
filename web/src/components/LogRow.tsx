@@ -2,7 +2,8 @@ import { memo } from 'preact/compat';
 import { useState } from 'preact/hooks';
 import type { LogLine } from '../lib/parse';
 import { isMultilineMember } from '../lib/parse';
-import { fmtTs, shortPod, shortReq, shortTenant, hexToRgba } from '../lib/format';
+import { fmtTs, shortPod, shortReq, hexToRgba } from '../lib/format';
+import { displayTenant, tenantColor, tenantName } from '../state/tenants';
 import { segmentize, type HighlightSpec } from '../lib/highlight';
 import { lineJson } from '../lib/json-extract';
 import { extractPattern } from '../lib/filters';
@@ -69,7 +70,11 @@ export const LogRow = memo(function LogRow({ line: l, prev, spec, nsColor, isCur
         <span class="r-lv">{multi ? '' : l.level}</span>
         <span class="r-pod truncate" title={l.pod} onClick={() => { if (l.pod) { includeOnly('pod', l.pod); toast(`Filtered: ${shortPod(l.pod)}`); } }}>{multi ? '│' : shortPod(l.pod)}</span>
         <span class="r-req num" title={l.reqId} onClick={e => { if (!l.reqId) return; if (e.shiftKey) { includeOnly('req', l.reqId); toast(`Request: ${shortReq(l.reqId)}`); } else openTrace(l.reqId); }}>{shortReq(l.reqId)}</span>
-        <span class={`r-ten truncate ${l.tenantAttributed ? 'attr' : ''}`} title={l.tenant ? `${l.tenant}${l.tenantAttributed ? ' (via request id)' : ''} — click to show only this tenant` : ''} onClick={() => { if (l.tenant) { includeOnly('tenant', l.tenant); toast(`Tenant: ${shortTenant(l.tenant)}`); } }}>{shortTenant(l.tenant)}</span>
+        <span class="r-ten">{l.tenant && (
+          <span class={`r-ten-pill truncate ${l.tenantAttributed ? 'attr' : ''}`} style={{ '--t': tenantColor(l.tenant) } as Record<string, string>}
+            title={`${tenantName(l.tenant) ? tenantName(l.tenant) + ' · ' : ''}${l.tenant}${l.tenantAttributed ? ' (via request id)' : ''} — click to show only this tenant`}
+            onClick={() => { includeOnly('tenant', l.tenant as string); toast(`Tenant: ${displayTenant(l.tenant)}`); }}>{displayTenant(l.tenant)}</span>
+        )}</span>
         <span class="r-msg"><Message l={l} spec={spec} /></span>
         <span class="r-actions">
           {l.kind === 'json' && <button class="r-act" title="Expand JSON" onClick={() => onToggleExpand(l.id)}>{expanded ? '[−]' : '[+]'}</button>}
