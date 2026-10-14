@@ -131,6 +131,21 @@ describe('tenant filter', () => {
     expect(ids2.some(id => lines[id].kind === 'http')).toBe(true);
     expect(compilePredicate(emptyFilters()).usesTenant).toBe(false);
   });
+  it('aliases: ids mapped to the same customer are filtered together', () => {
+    const ids = [...new Set(lines.map(l => l.tenant).filter(t => t && t !== 'health'))] as string[];
+    const [a, b] = ids;
+    const canon = (id: string) => (id === b ? a : id);
+    const inc = compilePredicate({ ...emptyFilters(), tenant: { [a]: 'include' } }, { canonicalTenant: canon });
+    const shown = recomputeView(lines, inc, new Set()).map(id => lines[id].tenant);
+    expect(shown.includes(a)).toBe(true);
+    expect(shown.includes(b)).toBe(true);
+    expect(shown.includes('health')).toBe(false);
+    const exc = compilePredicate({ ...emptyFilters(), tenant: { [a]: 'exclude' } }, { canonicalTenant: canon });
+    const shown2 = recomputeView(lines, exc, new Set()).map(id => lines[id].tenant);
+    expect(shown2.includes(a)).toBe(false);
+    expect(shown2.includes(b)).toBe(false);
+    expect(shown2.includes('health')).toBe(true);
+  });
 });
 
 describe('extractPattern', () => {

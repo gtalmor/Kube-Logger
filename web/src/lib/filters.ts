@@ -102,8 +102,14 @@ export interface Predicate {
   readonly usesTenant: boolean;
 }
 
-export function compilePredicate(f: FilterState): Predicate {
+export interface PredicateOptions {
+  /** Maps a raw tenant id to the customer it belongs to (aliases). Identity by default. */
+  canonicalTenant?: (id: string) => string;
+}
+
+export function compilePredicate(f: FilterState, opts: PredicateOptions = {}): Predicate {
   const level = compileTri(f.level), pod = compileTri(f.pod), req = compileTri(f.req), tenant = compileTri(f.tenant || {});
+  const canon = opts.canonicalTenant || ((id: string) => id);
   const hidden = f.hiddenPatterns.map(p => p.toLowerCase()).filter(Boolean);
   const hiddenExecs = new Set(f.hiddenExecIds);
   const search = compileSearch(f.search);
@@ -140,7 +146,7 @@ export function compilePredicate(f: FilterState): Predicate {
       if (!triOk(req, l.reqId)) return false;
       // Lines we could not attribute to any tenant always pass: hiding them
       // could hide the very event the user is looking for.
-      if (l.tenant !== undefined && !triOk(tenant, l.tenant)) return false;
+      if (l.tenant !== undefined && !triOk(tenant, canon(l.tenant))) return false;
       return matchesSearch(l);
     },
     continuation(l, hiddenReqIds) {

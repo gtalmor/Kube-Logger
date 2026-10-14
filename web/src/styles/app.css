@@ -89,7 +89,9 @@ body.resizing { cursor: col-resize; user-select: none; }
 .r-ten-pill.attr { opacity: .65; font-style: italic; border-style: dashed; }
 .r-ten-pill:hover { background: color-mix(in srgb, var(--t) 32%, transparent); }
 .t-chip .sw, .tri-list .sw { border-radius: 50%; }
-.sd-tenant { display: grid; grid-template-columns: 22px 110px 1fr 20px; gap: 8px; align-items: center; padding: 3px 6px; }
+.sd-tenant { display: grid; grid-template-columns: 22px 104px 1fr 132px 20px; gap: 6px; align-items: center; padding: 3px 6px; }
+.sd-tenant.aliased { opacity: .85; }
+.sd-tenant select.alias { padding-right: 18px; }
 .sd-tenant input[type=color] { width: 22px; height: 18px; border: 0; padding: 0; background: transparent; }
 .sd-tenant .id { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--fg-muted); }
 .sd-tenant .input { height: 26px; font-size: var(--fs-xs); }

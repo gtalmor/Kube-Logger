@@ -52,6 +52,9 @@ describe('parseLine', () => {
     const t = p(jsonLine({ ts, reqId: 'r', domain: 'a5ad1f2e-7c3b-4d1e-9f00-0123456789ab', msg: 'x' }))!;
     expect(t.tenant).toBe('a5ad1f2e-7c3b-4d1e-9f00-0123456789ab');
     expect(p(jsonLine({ ts, msg: 'x', extra: { domainId: 'camel' } }))!.tenant).toBe('camel');
+    expect(p(jsonLine({ ts, msg: 'x', extra: { tenant_id: 'tid-1' } }))!.tenant).toBe('tid-1');
+    expect(p(jsonLine({ ts, msg: 'x', extra: { tenantId: 'tid-2' } }))!.tenant).toBe('tid-2');
+    expect(p(jsonLine({ ts, reqId: 'r', domain: 'dom', msg: 'x', extra: { tenant_id: 'tid' } }))!.tenant).toBe('dom');   // domain_id wins
   });
 
   it('parses failures, axios errors and not-connected outputs', () => {

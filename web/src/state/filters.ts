@@ -4,10 +4,11 @@ import { computed, signal } from '@preact/signals';
 export type TriName = 'level' | 'pod' | 'req' | 'tenant';
 import { activeConstraintCount, compilePredicate, emptyFilters, triCycle, type FilterState, type TriFilter } from '../lib/filters';
 import { compileHighlights } from '../lib/highlight';
+import { aliasKey, canonicalTenant } from './tenants';
 import { loadHiddenPatterns, loadHighlights, loadPresets, presetToFilters, saveHiddenPatterns, saveHighlights, savePresets, type PresetStore } from '../lib/storage';
 
 export const filters = signal<FilterState>({ ...emptyFilters(), hiddenPatterns: loadHiddenPatterns(), highlights: loadHighlights() });
-export const predicate = computed(() => compilePredicate(filters.value));
+export const predicate = computed(() => { void aliasKey.value; return compilePredicate(filters.value, { canonicalTenant }); });
 export const highlightSpec = computed(() => compileHighlights(filters.value.highlights, filters.value.search));
 export const activeCount = computed(() => activeConstraintCount(filters.value));
 export const presets = signal<PresetStore>(loadPresets());

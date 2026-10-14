@@ -3,7 +3,7 @@ import { cycleTri, filters } from '../state/filters';
 import { autoScroll } from '../state/ui';
 import { ensureNsColor, nsColors, setNsColor } from '../state/setup';
 import { fmtCount } from '../lib/format';
-import { displayTenant, tenantColor, tenantMeta } from '../state/tenants';
+import { customerCounts, displayTenant, tenantColor, tenantMeta } from '../state/tenants';
 
 function LevelCount({ label, n, level, cls }: { label: string; n: number; level: string; cls: string }) {
   const state = filters.value.level[level];
@@ -34,14 +34,14 @@ export function StatusBar() {
         <LevelCount label="http" n={c.http} level="HTTP" cls="c-http" />
       </div>
       <div class="sb-ns">
-        {[...store.tenantCounts.entries()].sort((a, b) => b[1] - a[1]).map(([t, n]) => {
-          const col = tenantColor(t);
-          const st = filters.value.tenant[t];
+        {customerCounts(store.tenantCounts).map(c => {
+          const col = tenantColor(c.id);
+          const st = filters.value.tenant[c.id];
           return (
-            <button key={'t:' + t} class={`chip t-chip ${st ? 'on-' + st : ''}`} style={{ color: col }} title={`${t}\nclick: include → exclude → clear`} onClick={() => cycleTri('tenant', t)}>
+            <button key={'t:' + c.id} class={`chip t-chip ${st ? 'on-' + st : ''}`} style={{ color: col }} title={`${c.ids.join('\n')}\nclick: include → exclude → clear`} onClick={() => cycleTri('tenant', c.id)}>
               <span class="dot" style={{ background: col }} />
-              <span>{displayTenant(t)}</span>
-              <span class="num faint">{fmtCount(n)}</span>
+              <span>{displayTenant(c.id)}</span>
+              <span class="num faint">{fmtCount(c.count)}</span>
             </button>
           );
         })}

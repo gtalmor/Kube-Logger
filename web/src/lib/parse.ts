@@ -93,6 +93,14 @@ export function parseTs(text: string | undefined): number | undefined {
   return Number.isNaN(t) ? undefined : t;
 }
 
+// IO logs carry `domain_id`; other services use `tenant_id` / `tenantId`.
+// Both are the same customer to the user; the viewer maps them together.
+const TENANT_KEYS = ['domain_id', 'domainId', 'tenant_id', 'tenantId', 'tenant'];
+function pickTenant(j: Record<string, unknown>): string | undefined {
+  for (const k of TENANT_KEYS) { const v = j[k]; if (typeof v === 'string' && v) return v; }
+  return undefined;
+}
+
 const FLOW_STATES = new Set(['pre', 'process', 'done', 'post', 'failed']);
 function asFlowState(s: string): FlowState | undefined {
   return FLOW_STATES.has(s) ? (s as FlowState) : undefined;
@@ -164,7 +172,7 @@ export function parseLine(raw: string, ns: string | undefined, nsCapturing: Read
         ts, tsText: ts === undefined && typeof j.timestamp === 'string' ? j.timestamp : undefined,
         level: normalizeLevel(typeof j.level === 'string' ? j.level : 'INFO'),
         reqId: typeof j.req_id === 'string' ? j.req_id : undefined,
-        tenant: (typeof j.domain_id === 'string' && j.domain_id) || (typeof j.domainId === 'string' && j.domainId) || undefined,
+        tenant: pickTenant(j),
         msg, jsonOff: t.length - jm[3].length,
       };
       const fn = FLOW_NODE_RE.exec(msg);

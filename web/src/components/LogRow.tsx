@@ -3,7 +3,7 @@ import { useState } from 'preact/hooks';
 import type { LogLine } from '../lib/parse';
 import { isMultilineMember } from '../lib/parse';
 import { fmtTs, shortPod, shortReq, hexToRgba } from '../lib/format';
-import { displayTenant, tenantColor, tenantName } from '../state/tenants';
+import { canonicalTenant, displayTenant, tenantColor, tenantName } from '../state/tenants';
 import { segmentize, type HighlightSpec } from '../lib/highlight';
 import { lineJson } from '../lib/json-extract';
 import { extractPattern } from '../lib/filters';
@@ -73,7 +73,7 @@ export const LogRow = memo(function LogRow({ line: l, prev, spec, nsColor, isCur
         <span class="r-ten">{l.tenant && (
           <span class={`r-ten-pill truncate ${l.tenantAttributed ? 'attr' : ''}`} style={{ '--t': tenantColor(l.tenant) } as Record<string, string>}
             title={`${tenantName(l.tenant) ? tenantName(l.tenant) + ' · ' : ''}${l.tenant}${l.tenantAttributed ? ' (via request id)' : ''} — click to show only this tenant`}
-            onClick={() => { includeOnly('tenant', l.tenant as string); toast(`Tenant: ${displayTenant(l.tenant)}`); }}>{displayTenant(l.tenant)}</span>
+            onClick={() => { includeOnly('tenant', canonicalTenant(l.tenant as string)); toast(`Tenant: ${displayTenant(l.tenant)}`); }}>{displayTenant(l.tenant)}</span>
         )}</span>
         <span class="r-msg"><Message l={l} spec={spec} /></span>
         <span class="r-actions">

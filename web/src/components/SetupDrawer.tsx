@@ -6,7 +6,7 @@ import { addFlowDef, clearFlowDefs, flowDefs, removeFlowDef } from '../state/flo
 import { toast } from '../state/toasts';
 import { fmtRemaining, fmtCount, shortTenant } from '../lib/format';
 import { store } from '../state/app';
-import { forgetTenant, knownTenants, setTenantColor, setTenantName, tenantColor, tenantMeta, tenantName } from '../state/tenants';
+import { canonicalTenant, ensureTenantColors, forgetTenant, knownTenants, setTenantAlias, setTenantColor, setTenantName, tenantColor, tenantMeta, tenantName } from '../state/tenants';
 
 function AuthLine() {
   const a = auth.value;
@@ -22,31 +22,44 @@ function AuthLine() {
   return <div class="sd-auth"><span class={`dot ${dot}`} /> <span class="truncate">{label}{ms !== null ? ` — ${fmtRemaining(ms)}` : ''}{a.cluster ? ` · ${a.cluster}` : ''}</span></div>;
 }
 
+const displayOf = (id: string) => tenantName(id) || shortTenant(id);
+
 function TenantTable() {
   void store.dataVersion.value;
   void tenantMeta.value;
   const ids = knownTenants([...store.tenantCounts.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t));
   const [newId, setNewId] = useState('');
   const [newName, setNewName] = useState('');
-  const add = () => { const id = newId.trim(); if (!id) return; setTenantName(id, newName); tenantColor(id); setNewId(''); setNewName(''); };
+  const add = () => { const id = newId.trim(); if (!id) return; setTenantName(id, newName); ensureTenantColors([id]); setNewId(''); setNewName(''); };
   return (
     <div class="sd-list">
       {!ids.length && <div class="pop-empty">No tenants seen yet. Tenant = the domain_id on each log line.</div>}
+      {!!ids.length && <div class="pop-hint">A customer can have several ids (IO domain_id, other services' tenant_id): pick "same customer as…" to merge them.</div>}
       {ids.map(id => {
         const n = store.tenantCounts.get(id) || 0;
+        const primary = canonicalTenant(id);
+        const aliased = primary !== id;
+        const others = ids.filter(o => o !== id && canonicalTenant(o) === o);
         return (
-          <div key={id} class="sd-tenant">
-            <input type="color" value={tenantColor(id)} title="Colour" onInput={e => setTenantColor(id, (e.target as HTMLInputElement).value)} />
-            <span class="id truncate" title={id}>{shortTenant(id)}{n ? <span class="faint"> · {fmtCount(n)}</span> : <span class="faint"> · not seen</span>}</span>
-            <input class="input" placeholder="Name…" value={tenantName(id) || ''} onInput={e => setTenantName(id, (e.target as HTMLInputElement).value)} />
-            <button class="r-act" title="Forget name and colour" onClick={() => forgetTenant(id)}>×</button>
+          <div key={id} class={`sd-tenant ${aliased ? 'aliased' : ''}`}>
+            <input type="color" value={tenantColor(id)} title={aliased ? `Colour of ${displayOf(primary)}` : 'Colour'} disabled={aliased} onInput={e => setTenantColor(id, (e.target as HTMLInputElement).value)} />
+            <span class="id truncate" title={id}>{aliased ? '↳ ' : ''}{shortTenant(id)}{n ? <span class="faint"> · {fmtCount(n)}</span> : <span class="faint"> · not seen</span>}</span>
+            {aliased
+              ? <span class="muted truncate">same customer as <b>{displayOf(primary)}</b></span>
+              : <input class="input" placeholder="Name…" value={tenantName(id) || ''} onInput={e => setTenantName(id, (e.target as HTMLInputElement).value)} />}
+            <select class="input alias" title="Same customer as…" value={aliased ? primary : ''} onChange={e => setTenantAlias(id, (e.target as HTMLSelectElement).value || null)}>
+              <option value="">— own customer —</option>
+              {others.map(o => <option key={o} value={o}>= {displayOf(o)}</option>)}
+            </select>
+            <button class="r-act" title="Forget name, colour and merge" onClick={() => forgetTenant(id)}>×</button>
           </div>
         );
       })}
       <div class="sd-tenant">
         <span />
-        <input class="input" placeholder="domain id…" value={newId} onInput={e => setNewId((e.target as HTMLInputElement).value)} onKeyDown={e => { if (e.key === 'Enter') add(); }} />
+        <input class="input" placeholder="domain / tenant id…" value={newId} onInput={e => setNewId((e.target as HTMLInputElement).value)} onKeyDown={e => { if (e.key === 'Enter') add(); }} />
         <input class="input" placeholder="Name…" value={newName} onInput={e => setNewName((e.target as HTMLInputElement).value)} onKeyDown={e => { if (e.key === 'Enter') add(); }} />
+        <span />
         <button class="r-act" title="Add" disabled={!newId.trim()} onClick={add}>+</button>
       </div>
     </div>
