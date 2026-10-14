@@ -293,6 +293,9 @@ let authCache = null;  // { ts, profile, ok, arn, account, err, expiresAt, clust
 
 const RING_MAX_LINES = 20000;
 const RING_MAX_BYTES = 10 * 1024 * 1024;
+const WATCH_FAIL_LIMIT = 15;          // consecutive-ish watch failures …
+const WATCH_FAIL_WINDOW_MS = 60000;   // … within this window → restart the stream
+const WATCH_RESTART_DELAY_MS = 3000;
 
 // ── Relay producer connection ───────────────────────────────────────
 let producer = null;           // live ws to the relay
@@ -705,12 +708,31 @@ function attachStream(ns, startLimit) {
     }
   });
 
+  // stern's watch does not recover from a network change (VPN on/off, office
+  // Wi-Fi): client-go retries "Watch failed" forever with a stale resolver.
+  // After a burst of failures, respawn this namespace's stream.
+  const watchFails = [];
+  let restarted = false;
   proc.stderr.on('data', d => {
     const msg = d.toString().trim();
     if (!msg || msg.includes('ExperimentalWarning')) return;
     stderrBuf += msg + '\n';
     if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000);
     console.error(`[${ns}] stderr: ${msg.slice(0, 500)}`);
+    if (/Watch failed|connection refused|no such host|i\/o timeout|TLS handshake timeout/i.test(msg) && isCurrent() && !restarted) {
+      const now = Date.now();
+      watchFails.push(now);
+      while (watchFails.length && now - watchFails[0] > WATCH_FAIL_WINDOW_MS) watchFails.shift();
+      if (watchFails.length >= WATCH_FAIL_LIMIT) {
+        restarted = true;
+        console.error(`[${ns}] ${watchFails.length} watch failures in ${WATCH_FAIL_WINDOW_MS / 1000}s — restarting stream`);
+        broadcast({ type: 'stderr', ns, msg: `Restarting the ${ns} stream after repeated watch failures (network change?)` });
+        cap.procs.delete(ns);
+        setTimeout(() => { if (capture === cap && !cap.procs.has(ns)) attachStream(ns, limit); }, WATCH_RESTART_DELAY_MS);
+        killLater(proc);
+        return;
+      }
+    }
     // Early auth-expiration detection: stern surfaces these long before the
     // 60s periodic checkAuth would.
     if (/Token has expired|ExpiredToken|InvalidClientTokenId|UnauthorizedOperation|refresh failed|ExpiredTokenException|unable to get a Token|SSOTokenLoadError/i.test(msg)) {

@@ -71,6 +71,27 @@ function scheduleReconnect(): void {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Msg = Record<string, any> & { type: string };
 
+// stern repeats the same stderr line on every retry (e.g. "Watch failed"
+// every second per namespace). Collapse repeats: one toast per distinct
+// message per minute, with a running count, and strip the klog prefix.
+const stderrSeen = new Map<string, { at: number; n: number }>();
+function stderrToast(ns: string | undefined, msg: string): void {
+  const clean = msg.replace(/^[EWI]\d{4} \d\d:\d\d:\d\d\.\d+\s+\d+\s+\S+\]\s*/, '');  // klog "E1014 09:30:25.966687 34823 retrywatcher.go:129] "
+  const key = (ns || '') + '|' + clean.replace(/\d+/g, '#').slice(0, 160);
+  const now = Date.now();
+  const seen = stderrSeen.get(key);
+  if (seen && now - seen.at < 60000) { seen.n++; return; }
+  const n = seen ? seen.n : 0;
+  stderrSeen.set(key, { at: now, n: 1 });
+  if (stderrSeen.size > 200) { const oldest = [...stderrSeen.entries()].sort((a, b) => a[1].at - b[1].at)[0]; if (oldest) stderrSeen.delete(oldest[0]); }
+  const nx = /lookup ([^:\s"]+): no such host/.exec(clean);
+  const hint = nx && /proxyconnect/.test(clean)
+    ? ` — the proxy ${nx[1]} from your kubeconfig doesn't resolve on this network (VPN off?); stern can't reach the cluster API`
+    : nx ? ` — ${nx[1]} doesn't resolve on this network`
+    : /proxyconnect/.test(clean) ? ' — the kubeconfig proxy is unreachable on this network' : '';
+  toast(`${ns ? `[${ns}] ` : ''}${clean.slice(0, 160)}${n > 1 ? ` (×${n} in the last minute)` : ''}${hint}`, 'error', 6000);
+}
+
 function setCapture(active: boolean, m: Partial<Msg> = {}): void {
   const ns = Array.isArray(m.ns) ? m.ns : (typeof m.ns === 'string' ? m.ns.split(',').map((s: string) => s.trim()).filter(Boolean) : capture.value.ns);
   capture.value = {
@@ -167,7 +188,7 @@ export function dispatch(m: Msg): void {
       break;
 
     case 'stderr':
-      if (m.msg && !String(m.msg).includes('Experimental')) toast((m.ns ? `[${m.ns}] ` : '') + String(m.msg).slice(0, 120), 'error', 4000);
+      if (m.msg && !String(m.msg).includes('Experimental')) stderrToast(m.ns, String(m.msg));
       break;
     case 'error':
       toast('Error: ' + (m.msg || 'unknown'), 'error', 5000);
